@@ -946,3 +946,931 @@ handler failing with UserNotFound returns a real 404.
 > Give each expected failure its own response, and let handlers simply fail.
 
 <p class="drop-cap">Implement <code>Respondable</code> on the error, or annotate its schema with a status when using HttpApi. Mark expected failures with <code>ErrorReporter.ignore</code>, and keep them in the typed error channel all the way to the wire.</p>
+
+---
+layout: chapter
+chapter: VI
+accent: blue
+---
+
+# Atomic writes
+
+Make a file appear all at once, or not at all.
+
+---
+
+# The obvious version
+
+```ts {all|5|6}
+const create = Effect.fn(function* (directory: string, name: string, contents: string) {
+  const fs = yield* FileSystem.FileSystem
+  const path = yield* Path.Path
+  const target = path.join(directory, name)
+  if (yield* fs.exists(target)) return yield* new FileAlreadyExists({ name })
+  yield* fs.writeFileString(target, contents)
+})
+```
+
+<v-clicks>
+
+- Check, then write: two concurrent creates can both pass the check
+- Readers and file watchers can see the file half-written
+- A crash partway through leaves a truncated file behind
+
+</v-clicks>
+
+<!--
+Ran 10 of these concurrently against the same name: all 10 reported success, and the
+file held whichever writer happened to finish last (7, 8, 9 across three runs).
+-->
+
+---
+
+# Stage, then link
+
+<CodeFile path="create.ts" label="Create if absent">
+
+```ts {all|5|6-7|9-11|12}
+export const create = Effect.fn(function* (directory: string, name: string, contents: string) {
+  const fs = yield* FileSystem.FileSystem
+  const path = yield* Path.Path
+
+  const staging = yield* fs.makeTempDirectoryScoped({ directory, prefix: ".write-" })
+  const staged = path.join(staging, name)
+  yield* fs.writeFileString(staged, contents)
+
+  yield* fs.link(staged, path.join(directory, name)).pipe(
+    Effect.catchReason("PlatformError", "AlreadyExists", () => new FileAlreadyExists({ name })),
+  )
+}, Effect.scoped)
+```
+
+</CodeFile>
+
+<!--
+1. A private staging directory, created next to the target.
+2. Write the whole file there, where nobody is looking.
+3. link publishes it in one step, and fails if the name is already taken. That failure
+   is the existence check, so there's no gap between checking and writing.
+   catchReason picks the AlreadyExists reason out of PlatformError.
+4. Effect.scoped closes the scope when the write ends, which deletes the staging
+   directory along with the staged copy.
+-->
+
+---
+
+# The Scope does the cleanup
+
+```txt
+create, file is new         a.md                    staging directory removed
+create, file exists         FileAlreadyExists       staging directory removed
+failure before link         target untouched        staging directory removed
+interrupted mid-write       target untouched        staging directory removed
+```
+
+<v-click>
+
+`makeTempDirectoryScoped` ties the staging directory to the `Scope`, so it's deleted however the write ends: success, failure, or interruption.
+
+</v-click>
+
+<!--
+All four cases run against a real directory on Effect 4.1.2 with NodeServices.
+-->
+
+---
+
+# Why stage next to the target
+
+<v-clicks>
+
+- `link` and `rename` only work within one file system, so staging in `/tmp` can fail
+- A directory beside the target is guaranteed to be on the same one
+- The `.write-` prefix keeps it out of watchers looking for `*.md`
+
+</v-clicks>
+
+---
+
+# Replacing a file
+
+<CodeFile path="replace.ts" label="Replace">
+
+```ts {all|10-11|12}
+export const replace = Effect.fn(function* (directory: string, name: string, contents: string) {
+  const fs = yield* FileSystem.FileSystem
+  const path = yield* Path.Path
+  const target = path.join(directory, name)
+
+  const staging = yield* fs.makeTempDirectoryScoped({ directory, prefix: ".write-" })
+  const staged = path.join(staging, name)
+  yield* fs.writeFileString(staged, contents)
+
+  const { mode } = yield* fs.stat(target)
+  yield* fs.chmod(staged, mode)
+  yield* fs.rename(staged, target)
+}, Effect.scoped)
+```
+
+</CodeFile>
+
+<v-click>
+
+`rename` swaps the file in one step, so readers see the old contents or the new ones, never a mix. Copying the mode first keeps permissions from silently changing.
+
+</v-click>
+
+---
+
+# Racing writers
+
+```txt
+                     10 concurrent creates of race.md
+check, then write    10 report success      file holds whoever finished last
+stage, then link      1 succeeds            9 get FileAlreadyExists
+```
+
+<v-click>
+
+The atomic version doesn't need a lock or a retry. The file system's own `link` decides the winner.
+
+</v-click>
+
+---
+
+# In the wild
+
+<CodeFile path="traits/TraitStore.ts" label="Traits">
+
+```ts {all|2-5|7|8-15|16}
+Effect.gen(function* () {
+  const directory = yield* fs.makeTempDirectoryScoped({
+    directory: traitsDirectory,
+    prefix: ".traits-write-",
+  })
+  const temporary = path.join(directory, `${trait.name}.md`)
+  yield* fs.writeFileString(temporary, Trait.serialize(trait))
+  yield* fs.link(temporary, traitPath(trait.name)).pipe(
+    Effect.catchTags({
+      PlatformError: (error) =>
+        error.reason._tag === "AlreadyExists"
+          ? TraitAlreadyExistsError.make({ traitName: trait.name })
+          : error,
+    }),
+  )
+}).pipe(Effect.scoped)
+```
+
+</CodeFile>
+
+<!--
+Traits stores each trait as a Markdown file that a watcher reacts to. The staging prefix
+doesn't end in .md, so the watcher never sees the half-written copy. Same shape as our
+create; catchReason is the shorter way to write that catchTags.
+-->
+
+---
+
+# Takeaway
+
+> Write somewhere private, then publish with one atomic file-system call.
+
+<p class="drop-cap">Stage beside the target with <code>makeTempDirectoryScoped</code>, publish with <code>link</code> to create or <code>rename</code> to replace, and let the <code>Scope</code> clean up however the write ends.</p>
+
+---
+layout: chapter
+chapter: VII
+accent: green
+---
+
+# Variant schemas
+
+Define the fields once, and extract a schema for each place they're used.
+
+---
+
+# Heads up: it's unstable
+
+<p class="eyebrow">effect/schema/VariantSchema</p>
+
+```ts
+/**
+ * @stability unstable
+ */
+export declare const make: …
+```
+
+Every export of `VariantSchema` is marked `@stability unstable`, and so is `Model`, which is built on it. The API may still change.
+
+<v-click>
+
+<p class="drop-cap">Even so, it’s so awesome that it’s worth reaching for anyway. Pin your Effect version, and enjoy.</p>
+
+</v-click>
+
+<!--
+Checked in Effect 4.1.2: all 26 stability tags in VariantSchema.d.ts and all 57 in
+Model.d.ts say unstable.
+-->
+
+---
+
+# One record, three shapes
+
+<p class="eyebrow">A user row in the database</p>
+
+```txt
+           id    email    passwordHash    displayName    createdAt
+select     ✓     ✓        ✓               ✓              ✓
+insert           ✓        ✓               optional
+update           ✓        ✓               optional
+```
+
+<v-clicks>
+
+- The database generates `id` and `createdAt`, so they only come back on `select`
+- `displayName` has a database default, so writes may leave it out
+- Three schemas that have to agree on every other field
+
+</v-clicks>
+
+---
+
+# Define once
+
+<CodeFile path="User.ts" label="Implementation">
+
+```ts {all|1-4|7|8-9|10-14|18-20}
+const variants = VariantSchema.make({
+  variants: ["select", "insert", "update"],
+  defaultVariant: "select",
+})
+
+const fields = variants.Struct({
+  id: S.Number.pipe(variants.FieldOnly(["select"])),
+  email: S.String,
+  passwordHash: S.String,
+  displayName: variants.Field({
+    select: S.String,
+    insert: S.optional(S.String),
+    update: S.optional(S.String),
+  }),
+  createdAt: S.DateTimeUtc.pipe(variants.FieldOnly(["select"])),
+})
+
+export const User = variants.extract(fields, "select")
+export const UserInsert = variants.extract(fields, "insert")
+export const UserUpdate = variants.extract(fields, "update")
+```
+
+</CodeFile>
+
+<!--
+1. Name the variants once. VariantSchema comes from effect/schema.
+2. FieldOnly: id only exists when reading.
+3. A plain schema belongs to every variant.
+4. Field gives each variant its own schema: required on select, optional on writes.
+5. Extract an ordinary Schema.Struct per variant.
+-->
+
+---
+
+# What you get
+
+```ts
+typeof User.Type        // { id, email, passwordHash, displayName, createdAt }
+typeof UserInsert.Type  // { email, passwordHash, displayName? }
+typeof UserUpdate.Type  // { email, passwordHash, displayName? }
+
+const insert: UserInsert = { id: 1, email, passwordHash } // ✗ id is not part of an insert
+S.decodeUnknownSync(UserInsert)({ id: 9, email, passwordHash })  // { email, passwordHash }
+```
+
+<v-clicks>
+
+- Three ordinary `Schema.Struct`s, typed separately
+- Sending a generated column on a write is a type error
+- Decoding a write strips anything the variant doesn't declare
+
+</v-clicks>
+
+<!--
+All checked on Effect 4.1.2, including a @ts-expect-error on an insert with an id.
+Like Model, the update variant leaves id out; the id goes in the WHERE clause.
+-->
+
+---
+
+# Why not derive them?
+
+<v-clicks>
+
+- `mapFields(Struct.omit(…))` handles one field missing from one variant
+- With three variants and per-variant optionality, the rules spread across several derivations
+- A variant field keeps the decision next to the field it's about
+
+</v-clicks>
+
+---
+
+# In the wild: Model
+
+<p class="eyebrow">effect/schema/Model: the same idea, packaged</p>
+
+```ts
+class User extends Model.Class<User>("User")({
+  id: Model.GeneratedByDb(S.Number),
+  email: S.String,
+  passwordHash: Model.Sensitive(S.String),
+}) {}
+```
+
+```txt
+User.select       id, email, passwordHash      User.json         id, email
+User.insert       email, passwordHash          User.jsonCreate   email
+User.update       email, passwordHash          User.jsonUpdate   email
+```
+
+<v-click>
+
+Six variants from one declaration. The id never goes into an insert, and the password hash never leaves the server.
+
+</v-click>
+
+---
+
+# A field is a variant map
+
+<CodeFile path="effect/schema/Model.ts" label="Effect">
+
+```ts {all|1-4|6-10}
+export const GeneratedByDb = (schema) => Field({
+  select: schema,
+  json: schema,
+})
+
+export const Sensitive = (schema) => Field({
+  select: schema,
+  insert: schema,
+  update: schema,
+})
+```
+
+</CodeFile>
+
+<v-click>
+
+`Field` maps each variant to a schema, so a field can be absent from some variants or even take a different schema in each. `FieldOnly` is shorthand for the same schema in a few of them.
+
+</v-click>
+
+<!--
+Simplified from the compiled source: the real definitions add types. Model's variants
+are select, insert, update, json, jsonCreate and jsonUpdate, with select as the default.
+-->
+
+---
+
+# Takeaway
+
+> When one shape shows up in several places, declare its fields once and extract each variant.
+
+<p class="drop-cap">Use <code>VariantSchema</code> to put the "which variants have this field" decision on the field itself. The extracted schemas are ordinary structs, with annotations and checks shared across every variant.</p>
+
+---
+layout: chapter
+chapter: VIII
+accent: gold
+---
+
+# Shared configuration
+
+One typed definition of the environment, shared by every service and by the code that deploys them.
+
+---
+
+# Several services, overlapping env
+
+<p class="eyebrow">Two services in one monorepo</p>
+
+```txt
+              STAGE   OTEL_*   STRIPE_API_KEY   OPENAI_API_KEY
+service-a     ✓       ✓        ✓
+service-b     ✓       ✓                         ✓
+```
+
+<v-clicks>
+
+- Every service needs the stage and the telemetry settings
+- Each one adds secrets of its own
+- Reading `process.env` in each package drifts the moment one changes
+
+</v-clicks>
+
+---
+
+# The shared base
+
+<CodeFile path="shared/SharedEnv.ts" label="Shared">
+
+```ts {all|2|4-6|7}
+export const SharedEnv = Effect.gen(function* () {
+  const STAGE = Config.schema(Stage, "STAGE")
+  return yield* Config.all({
+    STAGE,
+    OTEL_EXPORTER_OTLP_ENDPOINT: Config.String("OTEL_EXPORTER_OTLP_ENDPOINT"),
+    OTEL_EXPORTER_OTLP_HEADERS: Config.Redacted("OTEL_EXPORTER_OTLP_HEADERS"),
+    OTEL_METRICS_EXPORTER: STAGE.pipe(Config.map((v) => (v.startsWith("dev_") ? "none" : "otlp"))),
+  })
+})
+```
+
+</CodeFile>
+
+<!--
+1. The stage is schema-validated: dev_*, staging-N, or prod.
+2. Secrets are Redacted, so they print as <redacted> in logs.
+3. Derived values live here too: no metrics exporter on dev stages.
+-->
+
+---
+
+# Each service extends it
+
+<CodeFile path="service-a/Env.ts · service-b/Env.ts" label="Per service">
+
+```ts {all|3|4-6|10-18}
+export class ServiceAEnv extends Context.Service<ServiceAEnv>()("service-a/Env", {
+  make: Effect.gen(function* () {
+    const shared = yield* SharedEnv
+    return yield* Config.all({
+      STRIPE_API_KEY: Config.Redacted("STRIPE_API_KEY"),
+    }).pipe(Effect.map(Struct.assign(shared)))
+  }),
+}) {}
+
+export class ServiceBEnv extends Context.Service<ServiceBEnv>()("service-b/Env", {
+  make: Effect.gen(function* () {
+    const shared = yield* SharedEnv
+    return yield* Config.all({
+      OPENAI_API_KEY: Config.Redacted("OPENAI_API_KEY"),
+    }).pipe(Effect.map(Struct.assign(shared)))
+  }),
+}) {}
+```
+
+</CodeFile>
+
+<!--
+1. Resolve the shared base.
+2. Resolve this service's own fields, then merge the base in.
+3. Service B: the same base, different additions. Each env is an ordinary service,
+   provided with Layer.effect(ServiceAEnv, ServiceAEnv.make).
+-->
+
+---
+
+# Consumers just yield it
+
+```ts
+const { STRIPE_API_KEY, STAGE } = yield* ServiceAEnv   // Redacted<string>, Stage
+const stripe = new Stripe(Redacted.value(STRIPE_API_KEY))
+```
+
+```txt
+service-a  STRIPE_API_KEY, STAGE, OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS, OTEL_METRICS_EXPORTER
+service-b  OPENAI_API_KEY, STAGE, OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS, OTEL_METRICS_EXPORTER
+logged     OTEL_EXPORTER_OTLP_HEADERS → <redacted>
+missing    ConfigError: SchemaError(Expected string at ["STRIPE_API_KEY"])
+```
+
+<v-clicks>
+
+- One typed object per service, shared fields included
+- Secrets stay redacted until you explicitly unwrap them
+- A missing variable fails at startup, naming the key
+
+</v-clicks>
+
+<!--
+Real output on Effect 4.1.2 with ConfigProvider.fromUnknown.
+-->
+
+---
+
+# Mind the order
+
+````md magic-move
+```ts
+make: SharedEnv.pipe(
+  Effect.map(Struct.assign({ STRIPE_API_KEY: Config.Redacted("STRIPE_API_KEY") })),
+)
+// STRIPE_API_KEY is still a Config, not a Redacted
+```
+```ts
+make: Effect.gen(function* () {
+  const shared = yield* SharedEnv
+  return yield* Config.all({ STRIPE_API_KEY: Config.Redacted("STRIPE_API_KEY") }).pipe(
+    Effect.map(Struct.assign(shared)),
+  )
+})
+// STRIPE_API_KEY is a Redacted<string>
+```
+````
+
+<v-click at="1">
+
+Merging `Config`s into already-resolved values never reads them. Resolve the service's own `Config.all` first, then merge the shared values in.
+
+</v-click>
+
+<!--
+Both checked at runtime: the first leaves an unresolved Config object in the service.
+link/LinkEnv.ts at this revision has the first shape; nothing reads its own fields
+yet, so it's latent. Under Alchemy it likely also means those keys are never bound
+to the Worker, since only Configs read during init are.
+-->
+
+---
+
+# Deploy and runtime agree
+
+<CodeFile path="service-a/Worker.ts" label="Alchemy (sketch)">
+
+```ts {all|4|5}
+export default class ServiceAWorker extends Cloudflare.Worker<ServiceAWorker>()(
+  "ServiceAWorker",
+  { /* worker props */ },
+  Effect.gen(function* () {
+    const layerEnv = yield* ServiceAEnv.make.pipe(Effect.map(Layer.succeed(ServiceAEnv)))
+    // … build the HTTP app
+    return { fetch: app.pipe(Effect.provide(layerEnv)) }
+  }),
+) {}
+```
+
+</CodeFile>
+
+<v-clicks>
+
+- At deploy, Alchemy runs this init and binds every `Config` it reads onto the Worker as a secret
+- At runtime, the same reads resolve from the Worker's environment
+- So the deploy and the service can't disagree about what's required
+
+</v-clicks>
+
+<!--
+Shape taken from crosshatch's workers. From Alchemy's source at the commit crosshatch
+pins: a deploy-time Config interceptor
+binds every Config read during Init onto the deploy target, and WorkerConfigProvider
+reads them back at runtime.
+-->
+
+---
+
+# In the wild
+
+<CodeFile path="internal-util/InternalEnv.ts" label="crosshatch (trimmed)">
+
+```ts {all|2-6|8-9|13}
+export const InternalEnv = Effect.gen(function* () {
+  const CHX_INTERNAL_STAGE = yield* Alchemy.Stage.pipe(
+    Effect.flatMap(S.decodeUnknownEffect(ChxStage.Stage)),
+    Effect.orDie,
+    Effect.map(Config.succeed),
+  )
+  return yield* Config.all({
+    CHX_INTERNAL_STAGE,
+    VITE_PUBLIC_CHX_INTERNAL_STAGE: CHX_INTERNAL_STAGE,
+    OTEL_EXPORTER_OTLP_ENDPOINT: Config.string("OTEL_EXPORTER_OTLP_ENDPOINT"),
+    OTEL_EXPORTER_OTLP_HEADERS: Config.redacted("OTEL_EXPORTER_OTLP_HEADERS"),
+    OTEL_TRACES_EXPORTER: Config.succeed("otlp"),
+    OTEL_METRICS_EXPORTER: CHX_INTERNAL_STAGE.pipe(Config.map((v) => (v.startsWith("dev_") ? "none" : "otlp"))),
+  })
+})
+```
+
+</CodeFile>
+
+<!--
+1. The stage comes from the Alchemy stack itself, validated against ChxStage.Stage.
+2. The same stage is exposed to the Vite frontend under a VITE_PUBLIC_ name.
+3. Derived values. (Trimmed: OTEL_LOGS_EXPORTER is set the same way as traces.)
+This repo is on an Effect 4 RC, where the constructors are still lowercase.
+-->
+
+---
+
+# Takeaway
+
+> Make the environment a service, built from a shared base that each package extends.
+
+<p class="drop-cap">Each package gets one typed, redacted, validated object, the shared fields are defined exactly once, and the code that deploys a service reads the same definition the service runs with.</p>
+
+---
+layout: chapter
+chapter: IX
+accent: coral
+---
+
+# Comparing models
+
+Run the same AI effect in parallel, with a different model for each run.
+
+---
+
+# The models
+
+<CodeFile path="models.ts" label="Layers">
+
+```ts {all|1-3|5-8|9}
+const anthropic = AnthropicClient.layerConfig({ apiKey: Config.Redacted("ANTHROPIC_API_KEY") })
+const openai = OpenAiClient.layerConfig({ apiKey: Config.Redacted("OPENAI_API_KEY") })
+const openrouter = OpenRouterClient.layerConfig({ apiKey: Config.Redacted("OPENROUTER_API_KEY") })
+
+const sonnet = AnthropicLanguageModel.layer({ model: "claude-sonnet-5-5" }).pipe(Layer.provide(anthropic))
+const opus = AnthropicLanguageModel.layer({ model: "claude-opus-5-5" }).pipe(Layer.provide(anthropic))
+const gpt = OpenAiLanguageModel.layer({ model: "gpt-6.1-sol" }).pipe(Layer.provide(openai))
+const gemini = OpenRouterLanguageModel.layer({ model: "google/gemini-2.5-flash" }).pipe(Layer.provide(openrouter))
+const judge = OpenRouterDecisionModel.layer({ model: "~typesafe/jev-latest" }).pipe(Layer.provide(openrouter))
+```
+
+</CodeFile>
+
+<!--
+1. One client layer per provider, each with its own redacted key.
+2. Every model is a Layer that provides the same LanguageModel service, whatever the
+   provider. (Gemini goes through OpenRouter: there's no Effect 4 Google provider.)
+3. The judge is a different service, DecisionModel, also just a layer.
+-->
+
+---
+
+# One effect, four models
+
+```ts {1-3|5-10|10}
+const idea = LanguageModel.generateText({
+  prompt: "Suggest one idea for a venue for the next Effect Miami meetup",
+}).pipe(Effect.map(({ text }) => text))
+
+const ideas = yield* Effect.all({
+  sonnet: idea.pipe(Effect.provide(sonnet)),
+  opus: idea.pipe(Effect.provide(opus)),
+  gemini: idea.pipe(Effect.provide(gemini)),
+  gpt: idea.pipe(Effect.provide(gpt)),
+}, { concurrency: "unbounded" })
+```
+
+<v-click>
+
+`idea` is a description, not a call. Each copy asks for a `LanguageModel` when it runs, so providing a different model layer gives each one a different model.
+
+</v-click>
+
+<!--
+1. Built once. Nothing has run yet.
+2. Each copy gets its own model, keyed by name.
+3. All four run concurrently.
+-->
+
+---
+
+# The decision
+
+<CodeFile path="PickVenue.ts" label="Decision">
+
+```ts {all|2|4-7|6}
+const PickVenue = Decision.make({
+  input: S.Struct({ sonnet: S.String, opus: S.String, gemini: S.String, gpt: S.String }),
+  decisions: {
+    best: Decision.classify({
+      instructions: "Which venue idea is best for the next Effect Miami meetup?",
+      criteria: { sonnet: null, opus: null, gemini: null, gpt: null },
+    }),
+  },
+})
+```
+
+</CodeFile>
+
+<!--
+1. A decision is data: an input schema, plus named questions about it.
+2. The input is exactly the record of ideas from the previous slide.
+3. classify picks one label. Here the labels are the candidates, so no descriptions
+   are needed (null).
+-->
+
+---
+
+# Pick a winner
+
+```ts {all|3|4|5-8}
+const program = Effect.gen(function* () {
+  const ideas = yield* Effect.all({ /* the four runs */ }, { concurrency: "unbounded" })
+  const { answers: { best } } = yield* DecisionModel.decide(PickVenue, { input: ideas })
+  return ideas[best.label] // best.label: "sonnet" | "opus" | "gemini" | "gpt"
+}).pipe(
+  Effect.provide(judge),
+  Effect.provide(FetchHttpClient.layer),
+)
+```
+
+<v-click>
+
+The judge answers with a typed label and a probability for each candidate, not free text to parse. And it's just another layer, swappable like the models it judges.
+
+</v-click>
+
+<!--
+Checked with stub models and a stub DecisionModel on Effect 4.1.2: the judge receives
+the four ideas as structured state and the classify decision; the label comes back
+typed. The real wiring type-checks with nothing left to provide.
+-->
+
+---
+
+# Takeaway
+
+> Write the AI effect once, then choose the model by what you provide to it.
+
+<p class="drop-cap">Every provider’s model is a layer for the same <code>LanguageModel</code> service, so comparing them is just <code>Effect.all</code> over copies with different layers. Keep the service lookup inside the effect, so each copy resolves its own.</p>
+
+---
+layout: chapter
+chapter: X
+accent: plum
+---
+
+# Schemas from the model
+
+Ask the model for a schema, then ask it for a value of that schema.
+
+---
+
+# Schemas are values
+
+```txt
+generateObject({ schema: Shape })     →  the model describes some fields
+hydrate(description)                  →  a real Schema, built at runtime
+generateObject({ schema: hydrated })  →  a value, validated against that schema
+```
+
+<v-clicks>
+
+- The second response's shape is decided by the first
+- Both steps are ordinary structured output
+- The only new piece is turning a description back into a `Schema`
+
+</v-clicks>
+
+---
+
+# The metaschema
+
+<CodeFile path="Shape.ts" label="Metaschema">
+
+```ts {all|1-5|3|7}
+const Field = S.Struct({
+  name: S.String,
+  type: S.Literals(["string", "number", "boolean", "string[]", "number[]"]),
+  description: S.String,
+})
+
+const Shape = S.Struct({ title: S.String, fields: S.Array(Field) })
+```
+
+</CodeFile>
+
+<v-click>
+
+A schema whose values describe schemas. It's deliberately flat, so every provider's structured-output mode accepts it and enforces it.
+
+</v-click>
+
+<!--
+1. One field: a name, a type from a closed list, and a description for the model.
+2. The closed list of types is the whole vocabulary the model can use.
+3. A shape is a titled list of fields.
+-->
+
+---
+
+# Hydrate it
+
+<CodeFile path="hydrate.ts" label="Implementation">
+
+```ts {all|1-7|9-11|11}
+const types = {
+  string: S.String,
+  number: S.Finite,
+  boolean: S.Boolean,
+  "string[]": S.Array(S.String),
+  "number[]": S.Array(S.Finite),
+} as const
+
+const hydrate = ({ title, fields }: typeof Shape.Type) =>
+  S.Struct(Object.fromEntries(fields.map((f) => [f.name, types[f.type].annotate({ description: f.description })])))
+    .annotate({ title })
+```
+
+</CodeFile>
+
+<!--
+1. Each type name maps to a real schema. S.Finite rather than S.Number: S.Number's
+   JSON codec also allows "Infinity" and "NaN" strings, which clutters what's sent
+   to the model and dropped the field's description.
+2. Build a Struct from the described fields, carrying each description along.
+3. The title becomes an annotation too, and both reach the model in step two.
+-->
+
+---
+
+# Two steps
+
+```ts {all|2-5|6|7-10}
+const program = Effect.gen(function* () {
+  const { value: shape } = yield* LanguageModel.generateObject({
+    prompt: "Describe the metadata worth tracking for a story world of sprites, vampires, witches and mermaids.",
+    schema: Shape,
+  })
+  const StoryWorld = hydrate(shape)
+  const { value } = yield* LanguageModel.generateObject({
+    prompt: "Invent a story world of sprites, vampires, witches and mermaids.",
+    schema: StoryWorld,
+  })
+  return value
+})
+```
+
+<!--
+1. Step one: structured output against the metaschema.
+2. Turn the answer into a schema.
+3. Step two: structured output against the schema the model just designed.
+-->
+
+---
+
+# What gets sent
+
+<p class="eyebrow">Step two's response schema, as the provider receives it</p>
+
+```json
+{
+  "type": "object",
+  "title": "StoryWorld",
+  "properties": {
+    "name": { "type": "string", "description": "The world's name" },
+    "peoples": { "type": "array", "items": { "type": "string" }, "description": "The peoples who live there" },
+    "magicLevel": { "type": "number", "description": "How common magic is, from 0 to 10" },
+    "hasSunlight": { "type": "boolean", "description": "Whether the sun ever rises" }
+  },
+  "required": ["name", "peoples", "magicLevel", "hasSunlight"],
+  "additionalProperties": false
+}
+```
+
+```txt
+→ {"name":"Hollowtide","peoples":["sprites","vampires","witches","mermaids"],"magicLevel":8,"hasSunlight":false}
+```
+
+<v-click>
+
+The model's own field descriptions come back to it as part of the schema, and the answer is decoded against it like any other.
+
+</v-click>
+
+<!--
+Captured from a run with a stub model, after Anthropic's structured-output transformer.
+Reordered "title" to the top for readability.
+-->
+
+---
+
+# Why not raw JSON Schema?
+
+```txt
+                              Anthropic   OpenAI     Problem
+raw JSON Schema (S.Json)      accepted    accepted   unenforced; invalid ones accept anything
+recursive metaschema          rejected    accepted   not portable
+flat metaschema               accepted    accepted   —
+```
+
+<v-click>
+
+`SchemaRepresentation.fromJsonSchemaDocument` assumes its input is valid. Given `{ "type": "objekt" }`, it quietly imports a schema that accepts everything. Constrain what the model writes, then build the schema yourself.
+
+</v-click>
+
+<!--
+All checked offline on Effect 4.1.2, running each provider's own structured-output
+transformer. The importer does keep real constraints (minimum became a check) and
+rejects regex patterns by default, so it's a fine target once step one is enforced.
+-->
+
+---
+
+# Takeaway
+
+> Give the model a small, closed vocabulary for describing schemas, and hydrate its answer into a real `Schema`.
+
+<p class="drop-cap">Because a schema is just a value, the shape of one response can come from another. Keep the metaschema flat so every provider enforces it, and validate everything that comes back.</p>

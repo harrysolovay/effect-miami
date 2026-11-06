@@ -1,28 +1,5 @@
 # Effect Design Patterns
 
-### 4. A parameterised layer constructor. `internal-util/layerOtlp.ts:6-25` / custom context+layer factory
-
-```ts
-export const layerOtlp = Effect.fn(function* (
-  { name: serviceName, version: serviceVersion }: { readonly name: string; readonly version: string },
-  attributes?: Record<string, unknown>,
-) {
-  const stage = yield* ChxStage
-  const { url } = yield* ChxDomain
-  const options = (v: "logs" | "traces" | "metrics") => ({
-    url: `${url}/otel/v1/${v}`,
-    resource: { serviceName, serviceVersion, ...(attributes && { attributes }) },
-  })
-  return Layer.mergeAll(
-    OtlpLogger.layer(options("logs")),
-    OtlpTracer.layer(options("traces")),
-    stage.startsWith("dev_") ? Layer.empty : OtlpMetrics.layer(options("metrics")),
-  ).pipe(Layer.provide(OtlpSerialization.layerJson))
-}, Layer.unwrap)
-```
-
-**Takeaway.** Use `Effect.fn(…, Layer.unwrap)` when a layer's choice or configuration depends on other services. You get a function that returns a `Layer`, with requirements tracked in its type.
-
 ### 5. Config files that export Layers
 
 **Codebase.** Traits

@@ -516,3 +516,433 @@ outer chat stays at 2 messages while each branch grows to 4.
 > Because the chat is a service, branching a conversation is just providing a different one.
 
 <p class="drop-cap">Since <code>Effect.provideServiceEffect</code> scopes the replacement to a single effect, code that uses the chat never knows. Concurrency and history isolation come from Effect itself rather than from the AI library.</p>
+
+---
+layout: chapter
+chapter: IV
+accent: coral
+---
+
+# Carrying context
+
+When an effect is stored and run somewhere else, decide what context it takes along.
+
+---
+
+# Context flows through yield*
+
+```ts {1-4|6-8}
+const saveOrder = Effect.fn(function* (payload: string) {
+  const db = yield* Database
+  yield* db.insert(payload)
+})
+
+const program = Effect.gen(function* () {
+  yield* saveOrder("o_1") // runs with the caller's context
+}).pipe(Effect.provide(Database.layer))
+```
+
+<v-click>
+
+Usually we never think about this. A child effect inherits whatever its caller has, and any gaps show up in `R`.
+
+</v-click>
+
+---
+
+# Stored, not yielded
+
+```ts {1-3|6-7|10-13}
+class Hooks extends Context.Reference<Map<string, (payload: string) => Effect.Effect<void>>>("app/Hooks", {
+  defaultValue: () => new Map(),
+}) {}
+
+// at startup
+const hooks = yield* Hooks
+hooks.set("order.placed", saveOrder) // ✗ Effect<void, never, Database> is not Effect<void>
+
+// much later, inside the server
+const dispatch = Effect.fn(function* (event: string, payload: string) {
+  const hook = (yield* Hooks).get(event)
+  if (hook) yield* hook(payload)
+})
+```
+
+<v-click>
+
+The hook is registered at one point in the lifecycle and run at another, by code with a different context. The type error is right: nobody will be there to provide `Database`.
+
+</v-click>
+
+---
+
+# Capture the context
+
+<CodeFile path="Hooks.ts" label="Implementation">
+
+```ts {all|7|8|13}
+export const layerHook = Effect.fnUntraced(function* <R>(
+  name: string,
+  f: (payload: string) => Effect.Effect<void, never, R>,
+) {
+  const hooks = yield* Hooks
+
+  const context = yield* Effect.context<R>()
+  hooks.set(name, flow(f, Effect.provideContext(context)))
+  return Layer.empty
+}, Layer.unwrap)
+
+// R is tracked on the layer, so it's provided like anything else
+layerHook("order.placed", saveOrder).pipe(Layer.provide(Database.layer))
+```
+
+</CodeFile>
+
+<!--
+1. While the layer is being built, grab the context the hook will need.
+2. Store a version of the hook that brings its own context along.
+3. The hook's requirements become the layer's requirements, so the type system
+   still makes sure Database is provided.
+-->
+
+---
+
+# In the wild
+
+<CodeFile path="crosshatch/Extension.ts" label="crosshatch">
+
+```ts {all|12|13|14}
+export const layerHandler = Effect.fnUntraced(function* <
+  Self,
+  Id extends string,
+  Identifier extends string,
+  Info extends Extension.Info,
+  Enrichment extends Extension.Enrichment<Info>,
+  R,
+>(
+  extension: Extension<Self, Id, Identifier, Info, Enrichment>,
+  f: (payload: ExtensionHandlerConfig<Info>) => Effect.Effect<Enrichment["Type"], never, R>,
+) {
+  const registry = yield* ExtensionRegistry
+  const context = yield* Effect.context<R>()
+  registry.set(extension, flow(f, Effect.provide(Layer.succeedContext(context)), Effect.scoped))
+  return Layer.empty
+}, Layer.unwrap)
+```
+
+</CodeFile>
+
+<!--
+Same shape: a client registers extension handlers at startup, and the payer calls them
+later while building a payment payload. Note the Effect.scoped at the end; we'll
+come back to it.
+-->
+
+---
+
+# What gets captured
+
+```ts {1|2|4-5}
+const context = yield* Effect.context<Database>() // typed Context<Database>…
+                                                   // …but holds everything in scope
+
+const onlyDb = Context.pick(Database)(context)     // holds just Database
+const noScope = Context.omit(Scope.Scope)(context) // everything but the Scope
+```
+
+<v-clicks>
+
+- `Effect.context<R>()` is typed by `R`, but at runtime it captures the whole context
+- `provideContext` merges: the runner's services stay visible, and captured ones win
+- `Context.pick` and `Context.omit` choose what the stored effect inherits
+
+</v-clicks>
+
+<!--
+Verified on Effect 4.1.2: a service provided around the capture but not named in R
+still showed up inside the stored effect. With Context.pick it didn't.
+-->
+
+---
+
+# The Scope trap
+
+```ts {1|3-6|8-9}
+flow(f, Effect.provideContext(context), Effect.scoped)
+
+const auditOrder = Effect.fn(function* (payload: string) {
+  yield* Effect.acquireRelease(open(payload), () => close(payload))
+  yield* saveOrder(payload)
+})
+
+// after one dispatch:   open o_1, insert o_1
+// after app shutdown:   open o_1, insert o_1, close o_1
+```
+
+<v-click>
+
+The context was captured while the layer was being built, so it includes the *layer's* `Scope`. That captured `Scope` shadows the fresh one from `Effect.scoped`, and every resource a hook opens stays open until the app shuts down.
+
+</v-click>
+
+---
+
+# Order matters
+
+````md magic-move
+```ts
+flow(f, Effect.provideContext(context), Effect.scoped)
+
+// after one dispatch:   open o_1, insert o_1
+// after app shutdown:   open o_1, insert o_1, close o_1
+```
+```ts
+flow(f, Effect.scoped, Effect.provideContext(context))
+
+// after one dispatch:   open o_1, insert o_1, close o_1
+```
+````
+
+<v-click at="1">
+
+The innermost provide wins. Providing the fresh `Scope` first, closest to `f`, gives each call its own, while everything else still comes from the captured context.
+
+</v-click>
+
+<!--
+Both orderings type-check, which is what makes this easy to miss. Verified by running
+both against Effect 4.1.2.
+-->
+
+---
+
+# Takeaway
+
+> When an effect runs outside the fiber that defined it, capture its context explicitly, and choose what goes with it.
+
+<p class="drop-cap">Grab the context with <code>Effect.context</code> where the effect is defined, and re-provide it where it runs. Since it captures everything in scope, decide what to leave behind with <code>Context.pick</code> or <code>Context.omit</code>, or by ordering, and keep the <code>Scope</code> local to each run.</p>
+
+---
+layout: chapter
+chapter: V
+accent: plum
+---
+
+# Errors that render themselves
+
+Let a domain error decide how it becomes an HTTP response.
+
+---
+
+# Status codes in handlers
+
+<p class="eyebrow">Mapping errors by hand</p>
+
+```ts {all|1-5|6-9}
+const getUser = Effect.gen(function* () {
+  const { id } = yield* HttpRouter.params
+  const user = yield* findUser(id!)
+  return yield* HttpServerResponse.json(user)
+}).pipe(
+  Effect.catchTag("UserNotFound", (e) =>
+    HttpServerResponse.json({ error: "UserNotFound", id: e.id }, { status: 404 })),
+)
+```
+
+<v-clicks>
+
+- Every handler repeats the same mapping
+- Forget one, and a domain error turns into a 500
+- The wire format drifts from route to route
+
+</v-clicks>
+
+---
+
+# The error knows its response
+
+<CodeFile path="UserNotFound.ts" label="Implementation">
+
+```ts {all|2|4-6|8}
+export class UserNotFound extends Data.TaggedError("UserNotFound")<{ readonly id: string }>
+  implements HttpServerRespondable.Respondable
+{
+  [HttpServerRespondable.symbol]() {
+    return HttpServerResponse.json({ error: "UserNotFound", id: this.id }, { status: 404 })
+  }
+
+  readonly [ErrorReporter.ignore] = true
+}
+```
+
+</CodeFile>
+
+<!--
+1. Respondable is a protocol: any value with this method can become a response.
+2. The error defines its own status and body, once.
+3. ErrorReporter.ignore marks it as an expected failure, more on that in a moment.
+-->
+
+---
+
+# Handlers just fail
+
+```ts {3}
+const getUser = Effect.gen(function* () {
+  const { id } = yield* HttpRouter.params
+  const user = yield* findUser(id!) // may fail with UserNotFound
+  return yield* HttpServerResponse.json(user)
+})
+```
+
+<v-click>
+
+No `catchTag`, no status code. The error stays in the typed error channel, and the server asks it for a response.
+
+</v-click>
+
+---
+
+# What the server sends
+
+```txt
+GET /users/1   200  application/json   {"id":"1","name":"Ada"}
+GET /users/2   404  application/json   {"error":"UserNotFound","id":"2"}
+GET /plain     500                     (an error with no Respondable)
+```
+
+<v-clicks>
+
+- A respondable error becomes exactly the response it describes
+- Anything else still falls back to a 500
+
+</v-clicks>
+
+<!--
+Real output: these routes served through HttpRouter.toWebHandler and called with
+Request objects, on Effect 4.1.2.
+-->
+
+---
+
+# Expected, not reported
+
+```txt
+UserNotFound   404   [ErrorReporter.ignore] = true   not reported
+Forbidden      403   respondable, not ignored        reported
+Plain          500   neither                         reported
+```
+
+<v-click>
+
+A 404 is a normal outcome, not an incident. Marking the error `ignore` keeps it out of every reporter, without changing the response it renders.
+
+</v-click>
+
+<!--
+Verified with an ErrorReporter installed at the app level: only Forbidden and Plain
+reached it. Reporters built with ErrorReporter.make skip anything marked ignore.
+-->
+
+---
+
+# Standard bodies
+
+<CodeFile path="Forbidden.ts" label="Problem Details">
+
+```ts {all|5-10}
+export class Forbidden extends Data.TaggedError("Forbidden")<{ readonly reason: string }>
+  implements HttpServerRespondable.Respondable
+{
+  [HttpServerRespondable.symbol]() {
+    return Effect.succeed(ProblemDetails.toResponse({
+      type: "https://example.com/problems/forbidden",
+      status: 403,
+      title: "Forbidden",
+      detail: this.reason,
+    }))
+  }
+}
+```
+
+</CodeFile>
+
+<v-click>
+
+`effect/http` ships RFC 9457 Problem Details, so errors can share one `application/problem+json` shape.
+
+</v-click>
+
+---
+
+# In the wild
+
+<CodeFile path="crosshatch/ChxHttp.ts" label="crosshatch (trimmed)">
+
+```ts {all|10|11-12|16}
+export class PaymentRequired
+  extends Data.TaggedError("PaymentRequired")<{
+    readonly required: Required
+    readonly request: HttpServerRequest.HttpServerRequest
+  }>
+  implements HttpServerRespondable.Respondable
+{
+  [HttpServerRespondable.symbol]() {
+    return Effect.gen({ self: this }, function* () {
+      const traceInfo = yield* /* current span's trace + span ids, if any */
+      const required = yield* S.encodeEffect(RequiredFromBase64JsonString)(this.required)
+      return HttpServerResponse.empty({ status: 402, headers: { [PAYMENT_REQUIRED]: required, ...traceInfo } })
+    })
+  }
+
+  override readonly [ErrorReporter.ignore] = true
+}
+```
+
+</CodeFile>
+
+<!--
+An x402 402 Payment Required. Rendering can itself be effectful: it reads the current
+span for trace headers and schema-encodes the payment requirements into a header.
+Handlers just call require(...), which yields this error.
+-->
+
+---
+
+# With HttpApi
+
+<p class="eyebrow">The status lives on the schema</p>
+
+```ts {1-3|5-9|11-12}
+export class UserNotFound extends S.TaggedError<UserNotFound>()("UserNotFound", {
+  id: S.String,
+}, { httpApiStatus: 404 }) {}
+
+HttpApiEndpoint.get("getUser", "/users/:id", {
+  params: { id: S.String },
+  success: User,
+  error: UserNotFound,
+})
+
+// OpenAPI responses:   200, 404
+// GET /users/2   →     404 {"_tag":"UserNotFound","id":"2"}
+```
+
+<v-click>
+
+When the API is declared with HttpApi, the error's status is part of its schema, so it shows up in the generated OpenAPI spec and in typed clients too.
+
+</v-click>
+
+<!--
+Verified on Effect 4.1.2: OpenApi.fromApi lists 200 and 404 for this endpoint, and the
+handler failing with UserNotFound returns a real 404.
+-->
+
+---
+
+# Takeaway
+
+> Give each expected failure its own response, and let handlers simply fail.
+
+<p class="drop-cap">Implement <code>Respondable</code> on the error, or annotate its schema with a status when using HttpApi. Mark expected failures with <code>ErrorReporter.ignore</code>, and keep them in the typed error channel all the way to the wire.</p>

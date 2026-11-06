@@ -1,0 +1,175 @@
+/* Design tokens borrowed from traits.sh: paper, ink, and four muted accents. */
+:root {
+  --paper: #faf4e3;
+  --paper-band: #f2e9cb;
+  --paper-code: #f5edd3;
+  --ink: #292e29;
+  --muted: #746e5f;
+  --rule: #d8ceb3;
+  --rule-strong: #d4c7a2;
+  --selection: #ebd3a1;
+  --coral: #c9795f;
+  --blue: #506d75;
+  --gold: #b79548;
+  --green: #798765;
+  --plum: #806181;
+
+  --serif: "Libre Baskerville", Georgia, serif;
+  --mono: SFMono-Regular, ui-monospace, "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+
+  --slidev-theme-primary: var(--blue);
+  --slidev-code-font-family: var(--mono);
+  --slidev-code-background: var(--paper-code);
+  --slidev-code-radius: 0;
+  --slidev-code-font-size: 12px;
+  --slidev-code-line-height: 19px;
+}
+
+html.dark {
+  --paper: #241d28;
+  --paper-band: #302535;
+  --paper-code: #352a39;
+  --ink: #ece0cf;
+  --muted: #b8a6b0;
+  --rule: #504052;
+  --rule-strong: #504052;
+  --selection: #635537;
+  --coral: #d99a90;
+  --blue: #a6afc7;
+  --gold: #cbb078;
+  --green: #adb392;
+  --plum: #c5a3c4;
+}
+
+::selection {
+  background: var(--selection);
+}
+
+/* Paper grain, same noise filter traits.sh uses on <body>. */
+.slidev-layout {
+  font-family: var(--serif);
+  color: var(--ink);
+  background-color: var(--paper);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='grain'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Cpath fill='%23887766' opacity='.045' filter='url(%23grain)' d='M0 0h180v180H0z'/%3E%3C/svg%3E");
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+.slidev-layout h1,
+.slidev-layout h2,
+.slidev-layout h3 {
+  font-family: var(--serif);
+  font-weight: 400;
+  color: var(--ink);
+}
+
+.slidev-layout h1 {
+  font-size: 2.4rem;
+  letter-spacing: -0.045em;
+  line-height: 1.3;
+  margin-bottom: 1.25rem;
+}
+
+.slidev-layout h1 + p {
+  opacity: 1;
+  color: var(--muted);
+}
+
+.slidev-layout h2 {
+  font-size: 1.55rem;
+  letter-spacing: -0.025em;
+  line-height: 1.4;
+}
+
+.slidev-layout h3 {
+  font-size: 1.15rem;
+  letter-spacing: -0.015em;
+}
+
+.slidev-layout p,
+.slidev-layout li {
+  line-height: 1.8;
+}
+
+.slidev-layout a {
+  color: var(--blue);
+  border-bottom: 1px solid var(--rule);
+  text-decoration: none;
+}
+
+.slidev-layout strong {
+  font-weight: 700;
+}
+
+.slidev-layout em {
+  font-style: italic;
+}
+
+.slidev-layout blockquote {
+  border-left: 1px solid var(--gold);
+  background: none;
+  padding: 0.25rem 0 0.25rem 1.25rem;
+  font-size: 1.2rem;
+  font-style: italic;
+  line-height: 1.8;
+  color: var(--ink);
+}
+
+.slidev-layout hr {
+  border-color: var(--rule);
+}
+
+/* Inline code */
+.slidev-layout :not(pre) > code {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  color: var(--blue);
+  background: none;
+  padding: 0;
+}
+
+/* Code blocks echo traits.sh's .code-sample: hairline border and a flat offset shadow. */
+.slidev-layout .slidev-code-wrapper,
+.slidev-layout pre.slidev-code {
+  border-radius: 0;
+}
+
+.slidev-layout pre.slidev-code {
+  border: 1px solid var(--rule-strong);
+  background: var(--paper-code) !important;
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--rule) 35%, transparent);
+  padding: 1rem 1.25rem;
+}
+
+/* Small-caps eyebrow label */
+.eyebrow {
+  font-family: var(--serif);
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 0.7rem;
+  line-height: 1.8;
+  color: var(--muted);
+}
+
+/* Accent helpers */
+.text-coral { color: var(--coral); }
+.text-blue { color: var(--blue); }
+.text-gold { color: var(--gold); }
+.text-green { color: var(--green); }
+.text-plum { color: var(--plum); }
+.text-muted { color: var(--muted); }
+
+.drop-cap::first-letter {
+  float: left;
+  color: var(--blue);
+  padding: 0.3rem 0.6rem 0.1rem 0;
+  font-size: 3.6rem;
+  line-height: 0.9;
+}
+
+/* Page number, nav controls */
+.slidev-page-number,
+#page-root .slidev-nav {
+  font-family: var(--serif);
+  color: var(--muted);
+}

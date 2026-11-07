@@ -21,8 +21,8 @@
   --slidev-code-font-family: var(--mono);
   --slidev-code-background: var(--paper-code);
   --slidev-code-radius: 0;
-  --slidev-code-font-size: 12px;
-  --slidev-code-line-height: 19px;
+  --slidev-code-font-size: 15px;
+  --slidev-code-line-height: 23px;
 }
 
 html.dark {
@@ -64,10 +64,10 @@ html.dark {
 }
 
 .slidev-layout h1 {
-  font-size: 2.4rem;
+  font-size: 2.25rem;
   letter-spacing: -0.045em;
   line-height: 1.3;
-  margin-bottom: 1.25rem;
+  margin-bottom: 1rem;
 }
 
 .slidev-layout h1 + p {
@@ -138,7 +138,12 @@ html.dark {
   border: 1px solid var(--rule-strong);
   background: var(--paper-code) !important;
   box-shadow: 3px 3px 0 color-mix(in srgb, var(--rule) 35%, transparent);
-  padding: 1rem 1.25rem;
+  padding: 0.85rem 1rem;
+}
+
+/* Content slides: slimmer margins so larger code still fits. */
+.slidev-layout.default {
+  padding: 1.75rem 2.25rem;
 }
 
 /* Small-caps eyebrow label */
@@ -173,3 +178,74 @@ html.dark {
   font-family: var(--serif);
   color: var(--muted);
 }
+
+/* Chat history panel, used beside code in the branching chapter. */
+.chat-grid {
+  display: grid;
+  grid-template-columns: 1fr 15rem;
+  gap: 1.25rem;
+  align-items: start;
+}
+.chat-grid pre.slidev-code, .chat-grid .slidev-code-wrapper { margin: 0; }
+.history {
+  margin: 0.33rem 0 0;
+  border: 1px solid var(--rule-strong);
+  background: var(--paper-code);
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--rule) 35%, transparent);
+}
+.history figcaption {
+  padding: 0.45rem 0.85rem;
+  border-bottom: 1px solid var(--rule-strong);
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  color: var(--muted);
+}
+.history ol {
+  list-style: none;
+  margin: 0;
+  padding: 0.6rem 0.85rem;
+  min-height: 9.5rem;
+}
+.history li {
+  margin: 0;
+  padding: 0.25rem 0 0.25rem 0.6rem;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  font-style: italic;
+  border-left: 2px solid var(--blue);
+}
+.history li + li { margin-top: 0.4rem; }
+.history li.assistant { border-left-color: var(--gold); }
+.history li span {
+  display: block;
+  font-style: normal;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 0.55rem;
+  color: var(--blue);
+}
+.history li.assistant span { color: var(--gold); }
+
+/* Compact rows: role and text on one line, a dot marking which fiber wrote it. */
+.history.compact ol { padding: 0.45rem 0.75rem; min-height: 0; }
+.history.compact li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  padding: 0.05rem 0 0.05rem 0.5rem;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+.history.compact li + li { margin-top: 0.25rem; }
+.history.compact li.assistant { color: var(--muted); }
+.history li.earlier { opacity: 0.45; }
+.history .dot {
+  flex: none;
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 50%;
+  align-self: center;
+}
+.history .dot.coral { background: var(--coral); }
+.history .dot.green { background: var(--green); }
+.history .dot.plum { background: var(--plum); }

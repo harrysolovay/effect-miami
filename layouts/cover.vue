@@ -1,5 +1,5 @@
 <script setup lang="ts">
-defineProps<{ eyebrow?: string; byline?: string }>()
+defineProps<{ eyebrow?: string; byline?: string; role?: string }>()
 </script>
 
 <template>
@@ -9,6 +9,7 @@ defineProps<{ eyebrow?: string; byline?: string }>()
       <p v-if="eyebrow" class="eyebrow">{{ eyebrow }}</p>
       <slot />
       <p v-if="byline" class="eyebrow byline">{{ byline }}</p>
+      <p v-if="role" class="eyebrow role">{{ role }}</p>
     </div>
   </div>
 </template>
@@ -50,7 +51,17 @@ defineProps<{ eyebrow?: string; byline?: string }>()
 
 .byline {
   margin-top: 2.5rem;
+  margin-bottom: 0;
   letter-spacing: 0.08em;
   font-size: 0.75rem;
+}
+
+.role {
+  margin-top: 0.35rem;
+  margin-bottom: 0;
+  text-transform: none;
+  letter-spacing: 0.02em;
+  font-style: italic;
+  font-size: 0.8rem;
 }
 </style>

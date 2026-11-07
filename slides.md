@@ -3,8 +3,9 @@ title: Advanced Effect Design Patterns
 theme: default
 colorSchema: auto
 layout: cover
-eyebrow: Effect Miami
+eyebrow: "Effect Miami #3"
 byline: By Harry Solovay
+role: CEO of Crosshatch Labs Inc.
 fonts:
   sans: Libre Baskerville
   serif: Libre Baskerville
@@ -35,50 +36,71 @@ A function that returns a class you can extend, then yield like any other servic
 
 <p class="eyebrow">A call that returns a class</p>
 
+````md magic-move
 ```ts
-class NotFound extends S.TaggedError<NotFound>()("NotFound", {
-  id: S.String,
-}) {}
-
 class Clock extends Context.Service<Clock, {
   readonly now: Effect.Effect<number>
 }>()("app/Clock") {}
+
+export const layer = Layer.succeed(Clock, {
+  now: Effect.sync(() => Date.now()),
+})
 ```
+```ts
+class Clock extends Context.Service<Clock>()("app/Clock", {
+  make: Effect.succeed({
+    now: Effect.sync(() => Date.now()),
+  }),
+}) {
+  static readonly layer = this.make.pipe(Layer.effect(this))
+}
+```
+````
 
 <v-click>
 
-`<Self>()(id, …)` returns a class built from your arguments. Nothing stops *us* from writing functions with the same shape.
+`Context.Service<Self>()(id, …)` is a call that returns a class built from your arguments. Nothing stops *us* from writing functions with the same shape.
 
 </v-click>
 
 <!--
-Both of these are calls that return a class. Self goes first in its own call because
-TypeScript can't infer some type arguments while you write others explicitly.
+This is a call that returns a class (S.TaggedError and S.Class work the same way).
+Self goes first in its own call because TypeScript can't infer some type arguments
+while you write others explicitly.
+
+Second overload: pass `make` and the shape is inferred from it. The class gets a
+static `make`, and the layer can live on the class too.
 -->
 
 ---
 
 # One topic per event
 
-<p class="eyebrow">Written by hand</p>
-
-```ts {all|1-2|4-5|7}
-class OrderPlaced extends Context.Service<OrderPlaced, PubSub.PubSub<Order>>()("app/OrderPlaced") {}
+```ts
+class OrderPlaced
+  extends Context.Service<OrderPlaced, PubSub.PubSub<Order>>()("app/OrderPlaced") {}
 const OrderPlacedLive = Layer.effect(OrderPlaced, PubSub.unbounded<Order>())
 
-class OrderShipped extends Context.Service<OrderShipped, PubSub.PubSub<Order>>()("app/OrderShipped") {}
-const OrderShippedLive = Layer.effect(OrderShipped, PubSub.unbounded<Order>())
+class OrderShipped
+  extends Context.Service<OrderShipped, PubSub.PubSub<Shipment>>()("app/OrderShipped") {}
+const OrderShippedLive = Layer.effect(OrderShipped, PubSub.unbounded<Shipment>())
+
+class UserSignedUp
+  extends Context.Service<UserSignedUp, PubSub.PubSub<User>>()("app/UserSignedUp") {}
+const UserSignedUpLive = Layer.effect(UserSignedUp, PubSub.unbounded<User>())
+
+class PaymentFailed
+  extends Context.Service<PaymentFailed, PubSub.PubSub<PaymentFailure>>()("app/PaymentFailed") {}
+const PaymentFailedLive = Layer.effect(PaymentFailed, PubSub.unbounded<PaymentFailure>())
 
 // … and again for every event
 ```
 
-<v-clicks>
+<v-click>
 
-- The same two lines, copied for every event
-- The schema lives somewhere else
-- Each layer has to be found and wired separately
+Copied per event, schema kept elsewhere, every layer wired by hand.
 
-</v-clicks>
+</v-click>
 
 ---
 
@@ -99,7 +121,7 @@ export const Service =
 </CodeFile>
 
 <!--
-1. Self is explicit, in its own call, same as S.TaggedError.
+1. Self is explicit, in its own call, same as Context.Service.
 2. The id and schema are inferred. Item extends S.Top accepts any schema (S.Any would
    mean the schema for `any`), and Item["Type"] fixes what the channel carries.
 3. The real tag is a plain Context.Service. We aren't reimplementing anything.
@@ -115,14 +137,19 @@ export const Service =
 <p class="eyebrow">Orders.ts</p>
 
 ```ts
-export class OrderPlaced extends Topic.Service<OrderPlaced>()("app/OrderPlaced", Order) {}
-export class OrderShipped extends Topic.Service<OrderShipped>()("app/OrderShipped", Order) {}
-export class UserSignedUp extends Topic.Service<UserSignedUp>()("app/UserSignedUp", User) {}
+export class OrderPlaced
+  extends Topic.Service<OrderPlaced>()("app/OrderPlaced", Order) {}
+export class OrderShipped
+  extends Topic.Service<OrderShipped>()("app/OrderShipped", Shipment) {}
+export class UserSignedUp
+  extends Topic.Service<UserSignedUp>()("app/UserSignedUp", User) {}
+export class PaymentFailed
+  extends Topic.Service<PaymentFailed>()("app/PaymentFailed", PaymentFailure) {}
 ```
 
 <v-clicks>
 
-- One line per event
+- One declaration per event
 - The schema is declared right next to the event
 - `OrderPlaced.layer` and `OrderPlaced.schema` come with the class
 
@@ -132,7 +159,7 @@ export class UserSignedUp extends Topic.Service<UserSignedUp>()("app/UserSignedU
 
 # Yield it like any service
 
-```ts {1-4|5|7}
+```ts {1-4|5|8}
 const program = Effect.gen(function* () {
   const topic = yield* OrderPlaced   // PubSub<Order>
   yield* PubSub.publish(topic, order)
@@ -165,7 +192,7 @@ export interface Topic<Self, Id extends string, Item extends S.Top>
 
 <v-click>
 
-Annotate the factory's return type with it, and the type shows up by name in hovers and docs. The `new` signature is what keeps the result extendable as a class.
+Annotate the factory's return type with it, and the type shows up by name in hovers and docs.
 
 </v-click>
 
@@ -258,7 +285,7 @@ const providers = {
 
 - Every provider has to be known to the library
 - A new provider means a new library release
-- Options shrink to what every provider has in common
+- Provider-specific configuration must be maintained and carefully migrated between versions
 - Secrets and HTTP clients get handled case by case
 
 </v-clicks>
@@ -307,11 +334,12 @@ The config file is ordinary TypeScript. The user picks the implementation, and w
 
 <CodeFile path="TraitsConfig.ts" label="Implementation">
 
-```ts {all|1|3-5|9|10|11}
+```ts {all|1|3-6|10|11|12}
 export type TraitsConfig = typeof TraitsConfig.Type
 export const TraitsConfig = S.Struct({
   layerLanguageModel: S.declare(
-    (u): u is Layer.Layer<LanguageModel.LanguageModel, unknown, HttpClient.HttpClient> => Layer.isLayer(u),
+    (u): u is Layer.Layer<LanguageModel.LanguageModel, unknown, HttpClient.HttpClient> =>
+      Layer.isLayer(u),
   ),
 })
 
@@ -338,9 +366,11 @@ export const layer = Effect.gen(function* () {
 
 <p class="eyebrow">Library code only ever sees the service</p>
 
-```ts {1-4|5}
+```ts {1-6|7}
 const review = Effect.gen(function* () {
-  const response = yield* LanguageModel.generateText({ prompt: "Does this diff follow the trait?" })
+  const response = yield* LanguageModel.generateText({
+    prompt: "Does this diff follow the trait?",
+  })
   return response.text
 }).pipe(
   Effect.provide(TraitsConfig.layer),
@@ -366,7 +396,7 @@ A different provider or an internal gateway is just a different Layer in the use
 
 > Let users configure your library by handing it a Layer.
 
-<p class="drop-cap">The Layer is the extension point. Any implementation of the service works, along with whatever it depends on, and <code>S.declare</code> keeps the boundary validated like any other input.</p>
+<p class="drop-cap">The Layer is the extension point. Any implementation of the service works, along with whatever it depends on, and <code>S.declare</code> keeps the boundary validated and typed like any other input.</p>
 
 ---
 layout: chapter
@@ -384,13 +414,27 @@ Fork a chat's history the way you'd fork a fiber.
 
 <p class="eyebrow">Its history lives in a Ref</p>
 
-```ts {all|2|3|4}
+<div class="chat-grid">
+
+```ts {all|2|3|4|5}
 const program = Effect.gen(function* () {
   const chat = yield* Chat.Chat
-  yield* chat.generateText({ prompt: "Today we're going to review some code." })
-  yield* chat.generateText({ prompt: "Here's the first file: …" }) // sees the first exchange
-})
+  yield* chat.generateText({ prompt: "Let's review some code." })
+  yield* chat.generateText({ prompt: "Here's the first file: …" })
+}).pipe(Effect.provideServiceEffect(Chat.Chat, Chat.empty))
 ```
+
+<figure class="history">
+  <figcaption>chat.history</figcaption>
+  <ol>
+    <li v-click="2" class="user"><span>user</span>Let's review some code.</li>
+    <li v-click="2" class="assistant"><span>assistant</span>Sure, send it over.</li>
+    <li v-click="3" class="user"><span>user</span>Here's the first file: …</li>
+    <li v-click="3" class="assistant"><span>assistant</span>Line 12 leaks a handle…</li>
+  </ol>
+</figure>
+
+</div>
 
 <v-click>
 
@@ -402,6 +446,65 @@ Every `generateText` appends to the same history. So what happens when three exp
 Chat.Chat is an ordinary service. Its history is a Ref<Prompt>, and each call reads
 from and appends to it. Sharing one chat across concurrent fibers would mix all the
 experts into one conversation.
+-->
+
+---
+
+# Sharing one chat
+
+<p class="eyebrow">Three experts, one history</p>
+
+<div class="chat-grid">
+<div>
+
+```ts {all|7-10|3|4}
+const review = Effect.fn(function* (expert: string) {
+  const chat = yield* Chat.Chat
+  yield* chat.generateText({ prompt: `You're the ${expert} expert.` })
+  yield* chat.generateText({ prompt: "What do you think?" })
+})
+
+yield* Effect.all(
+  ["security", "performance", "design"].map(review),
+  { concurrency: "unbounded" },
+)
+```
+
+<v-click at="4">
+
+Each call is atomic, but turns from different fibers interleave. By the time anyone asks *"What do you think?"*, the model has been told it's all three experts.
+
+</v-click>
+
+</div>
+
+<figure class="history compact">
+  <figcaption>chat.history</figcaption>
+  <ol>
+    <li class="user earlier"><i class="dot"></i>Let's review some code.</li>
+    <li class="assistant earlier"><i class="dot"></i>…</li>
+    <li v-click="2" class="user"><i class="dot coral"></i>You're the security expert.</li>
+    <li v-click="2" class="assistant"><i class="dot coral"></i>…</li>
+    <li v-click="2" class="user"><i class="dot green"></i>You're the performance expert.</li>
+    <li v-click="2" class="assistant"><i class="dot green"></i>…</li>
+    <li v-click="2" class="user"><i class="dot plum"></i>You're the design expert.</li>
+    <li v-click="2" class="assistant"><i class="dot plum"></i>…</li>
+    <li v-click="3" class="user"><i class="dot coral"></i>What do you think?</li>
+    <li v-click="3" class="assistant"><i class="dot coral"></i>…</li>
+    <li v-click="3" class="user"><i class="dot green"></i>What do you think?</li>
+    <li v-click="3" class="assistant"><i class="dot green"></i>…</li>
+    <li v-click="3" class="user"><i class="dot plum"></i>What do you think?</li>
+    <li v-click="3" class="assistant"><i class="dot plum"></i>…</li>
+  </ol>
+</figure>
+
+</div>
+
+<!--
+Chat serializes calls with a one-permit semaphore, so no single turn gets torn. But
+the lock is per call, not per expert. This is the real order with Effect 4.1.2: all
+three role prompts land first, then all three questions, and every question sees
+every role. The experts need their own copy of the history.
 -->
 
 ---
@@ -438,75 +541,48 @@ branch satisfies <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E
 
 ---
 
-# One expert
+# Branch each expert
 
+````md magic-move
 ```ts
-const suggestion = Effect.fn(function* (code: string, expert: string) {
-  const chat = yield* Chat.Chat
-  const { text } = yield* chat.generateText({
-    prompt: `You are an expert ${expert}. Please provide feedback on the following code:\n\n${code}`,
-  })
-  return text
-})
-```
-
-<v-click>
-
-`suggestion` has no idea it might run in a branch. It just asks for `Chat.Chat`.
-
-</v-click>
-
----
-
-# Fan out
-
-```ts {all|5-9|11-12|14-17}
 const program = Effect.gen(function* () {
   const chat = yield* Chat.Chat
-  yield* chat.generateText({ prompt: "Today we're going to review some code." })
-
-  const experts = ["security researcher", "developer experience engineer", "developer advocate"]
-  const suggestions = yield* Effect.all(
-    experts.map((expert) => suggestion(code, expert).pipe(branch)),
+  yield* chat.generateText({ prompt: "Let's review some code." })
+  yield* Effect.all(
+    ["security", "performance", "design"].map(review),
     { concurrency: "unbounded" },
   )
-
-  const { content } = yield* Ref.get(chat.history)
-  console.log(content.length) // outer conversation is unaffected
-  return suggestions
 }).pipe(
   Effect.provideServiceEffect(Chat.Chat, Chat.empty),
   Effect.provide(TraitsConfig.layer),
 )
 ```
-
-<!--
-1. Each expert runs concurrently, each with its own copy of the outer chat.
-2. The outer chat still has just the opening exchange.
-3. Provide an empty Chat to start, and the LanguageModel from Chapter II's
-   TraitsConfig.layer.
--->
-
----
-
-# What each chat sees
-
-```txt
-outer chat     2 messages   the opening exchange
-each branch    4 messages   the opening exchange + its own review
+```ts {5}
+const program = Effect.gen(function* () {
+  const chat = yield* Chat.Chat
+  yield* chat.generateText({ prompt: "Let's review some code." })
+  yield* Effect.all(
+    ["security", "performance", "design"].map((expert) => review(expert).pipe(branch)),
+    { concurrency: "unbounded" },
+  )
+}).pipe(
+  Effect.provideServiceEffect(Chat.Chat, Chat.empty),
+  Effect.provide(TraitsConfig.layer),
+)
 ```
+````
 
-<v-clicks>
+<v-click at="1">
 
-- Every branch starts from the outer chat's history
-- Branches never see each other's messages
-- The outer conversation stays exactly as it was
+One `.pipe(branch)` per expert. Each sees the opening exchange plus only its own turns, and the outer chat keeps just the opening exchange. `review` itself doesn't change: it still just asks for `Chat.Chat`.
 
-</v-clicks>
+</v-click>
 
 <!--
-Checked by running this exact branch function against a stub LanguageModel: the
-outer chat stays at 2 messages while each branch grows to 4.
+Same review function as "Sharing one chat". Checked on Effect 4.1.2 with a stub
+model: each expert's question saw 5 messages (the 2 shared, its role turn, its
+question), and the outer chat stayed at 2.
+Provide an empty Chat to start, and the LanguageModel from Chapter II's TraitsConfig.layer.
 -->
 
 ---
@@ -552,8 +628,10 @@ Usually we never think about this. A child effect inherits whatever its caller h
 
 # Stored, not yielded
 
-```ts {1-3|6-7|10-13}
-class Hooks extends Context.Reference<Map<string, (payload: string) => Effect.Effect<void>>>("app/Hooks", {
+```ts {1-5|8-9|12-15}
+class Hooks extends Context.Reference<
+  Map<string, (payload: string) => Effect.Effect<void>>
+>("app/Hooks", {
   defaultValue: () => new Map(),
 }) {}
 
@@ -806,42 +884,25 @@ No `catchTag`, no status code. The error stays in the typed error channel, and t
 # What the server sends
 
 ```txt
-GET /users/1   200  application/json   {"id":"1","name":"Ada"}
-GET /users/2   404  application/json   {"error":"UserNotFound","id":"2"}
-GET /plain     500                     (an error with no Respondable)
+GET /users/1   200   {"id":"1","name":"Ada"}
+GET /users/2   404   {"error":"UserNotFound","id":"2"}   not reported
+GET /plain     500   (an error with no Respondable)      reported
 ```
 
 <v-clicks>
 
 - A respondable error becomes exactly the response it describes
 - Anything else still falls back to a 500
+- `ErrorReporter.ignore` keeps the expected 404 out of every reporter, without changing its response
 
 </v-clicks>
 
 <!--
 Real output: these routes served through HttpRouter.toWebHandler and called with
-Request objects, on Effect 4.1.2.
--->
-
----
-
-# Expected, not reported
-
-```txt
-UserNotFound   404   [ErrorReporter.ignore] = true   not reported
-Forbidden      403   respondable, not ignored        reported
-Plain          500   neither                         reported
-```
-
-<v-click>
-
-A 404 is a normal outcome, not an incident. Marking the error `ignore` keeps it out of every reporter, without changing the response it renders.
-
-</v-click>
-
-<!--
-Verified with an ErrorReporter installed at the app level: only Forbidden and Plain
-reached it. Reporters built with ErrorReporter.make skip anything marked ignore.
+Request objects, on Effect 4.1.2, with an ErrorReporter installed at the app level.
+A 404 is a normal outcome, not an incident. A respondable error *without* ignore
+(e.g. a 403) is still reported. Reporters built with ErrorReporter.make skip anything
+marked ignore, which also keeps it out of OTel.
 -->
 
 ---
@@ -879,7 +940,7 @@ export class Forbidden extends Data.TaggedError("Forbidden")<{ readonly reason: 
 
 <CodeFile path="crosshatch/ChxHttp.ts" label="crosshatch (trimmed)">
 
-```ts {all|10|11-12|16}
+```ts {all|10|11-13|16}
 export class PaymentRequired
   extends Data.TaggedError("PaymentRequired")<{
     readonly required: Required
@@ -891,10 +952,10 @@ export class PaymentRequired
     return Effect.gen({ self: this }, function* () {
       const traceInfo = yield* /* current span's trace + span ids, if any */
       const required = yield* S.encodeEffect(RequiredFromBase64JsonString)(this.required)
-      return HttpServerResponse.empty({ status: 402, headers: { [PAYMENT_REQUIRED]: required, ...traceInfo } })
+      const headers = { [PAYMENT_REQUIRED]: required, ...traceInfo }
+      return HttpServerResponse.empty({ status: 402, headers })
     })
   }
-
   override readonly [ErrorReporter.ignore] = true
 }
 ```
@@ -1007,6 +1068,12 @@ export const create = Effect.fn(function* (directory: string, name: string, cont
 
 </CodeFile>
 
+<v-click>
+
+`makeTempDirectoryScoped` ties the staging directory to the `Scope`, so it's deleted however the write ends: success, failure, or interruption.
+
+</v-click>
+
 <!--
 1. A private staging directory, created next to the target.
 2. Write the whole file there, where nobody is looking.
@@ -1015,40 +1082,15 @@ export const create = Effect.fn(function* (directory: string, name: string, cont
    catchReason picks the AlreadyExists reason out of PlatformError.
 4. Effect.scoped closes the scope when the write ends, which deletes the staging
    directory along with the staged copy.
+
+Checked against a real directory on Effect 4.1.2 with NodeServices: new file, existing
+file, failure before link, and interruption mid-write all leave the staging directory
+removed.
+
+Why stage next to the target: link and rename only work within one file system, so
+staging in /tmp can fail. A directory beside the target is guaranteed to be on the same
+one, and the .write- prefix keeps it out of watchers looking for *.md.
 -->
-
----
-
-# The Scope does the cleanup
-
-```txt
-create, file is new         a.md                    staging directory removed
-create, file exists         FileAlreadyExists       staging directory removed
-failure before link         target untouched        staging directory removed
-interrupted mid-write       target untouched        staging directory removed
-```
-
-<v-click>
-
-`makeTempDirectoryScoped` ties the staging directory to the `Scope`, so it's deleted however the write ends: success, failure, or interruption.
-
-</v-click>
-
-<!--
-All four cases run against a real directory on Effect 4.1.2 with NodeServices.
--->
-
----
-
-# Why stage next to the target
-
-<v-clicks>
-
-- `link` and `rename` only work within one file system, so staging in `/tmp` can fail
-- A directory beside the target is guaranteed to be on the same one
-- The `.write-` prefix keeps it out of watchers looking for `*.md`
-
-</v-clicks>
 
 ---
 
@@ -1198,9 +1240,7 @@ update           ✓        ✓               optional
 
 # Define once
 
-<CodeFile path="User.ts" label="Implementation">
-
-```ts {all|1-4|7|8-9|10-14|18-20}
+```ts {all|1-4|7|8-9|10-14|17-19}
 const variants = VariantSchema.make({
   variants: ["select", "insert", "update"],
   defaultVariant: "select",
@@ -1217,13 +1257,10 @@ const fields = variants.Struct({
   }),
   createdAt: S.DateTimeUtc.pipe(variants.FieldOnly(["select"])),
 })
-
 export const User = variants.extract(fields, "select")
 export const UserInsert = variants.extract(fields, "insert")
 export const UserUpdate = variants.extract(fields, "update")
 ```
-
-</CodeFile>
 
 <!--
 1. Name the variants once. VariantSchema comes from effect/schema.
@@ -1257,19 +1294,11 @@ S.decodeUnknownSync(UserInsert)({ id: 9, email, passwordHash })  // { email, pas
 <!--
 All checked on Effect 4.1.2, including a @ts-expect-error on an insert with an id.
 Like Model, the update variant leaves id out; the id goes in the WHERE clause.
+
+If asked "why not derive them?": mapFields(Struct.omit(…)) handles one field missing
+from one variant, but with three variants and per-variant optionality the rules spread
+across several derivations. A variant field keeps the decision next to the field.
 -->
-
----
-
-# Why not derive them?
-
-<v-clicks>
-
-- `mapFields(Struct.omit(…))` handles one field missing from one variant
-- With three variants and per-variant optionality, the rules spread across several derivations
-- A variant field keeps the decision next to the field it's about
-
-</v-clicks>
 
 ---
 
@@ -1373,14 +1402,16 @@ service-b     ✓       ✓                         ✓
 
 <CodeFile path="shared/SharedEnv.ts" label="Shared">
 
-```ts {all|2|4-6|7}
+```ts {all|2|4-6|7-9}
 export const SharedEnv = Effect.gen(function* () {
   const STAGE = Config.schema(Stage, "STAGE")
   return yield* Config.all({
     STAGE,
     OTEL_EXPORTER_OTLP_ENDPOINT: Config.String("OTEL_EXPORTER_OTLP_ENDPOINT"),
     OTEL_EXPORTER_OTLP_HEADERS: Config.Redacted("OTEL_EXPORTER_OTLP_HEADERS"),
-    OTEL_METRICS_EXPORTER: STAGE.pipe(Config.map((v) => (v.startsWith("dev_") ? "none" : "otlp"))),
+    OTEL_METRICS_EXPORTER: STAGE.pipe(
+      Config.map((v) => (v.startsWith("dev_") ? "none" : "otlp")),
+    ),
   })
 })
 ```
@@ -1438,8 +1469,8 @@ const stripe = new Stripe(Redacted.value(STRIPE_API_KEY))
 ```
 
 ```txt
-service-a  STRIPE_API_KEY, STAGE, OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS, OTEL_METRICS_EXPORTER
-service-b  OPENAI_API_KEY, STAGE, OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS, OTEL_METRICS_EXPORTER
+service-a  STRIPE_API_KEY + the shared STAGE, OTEL_EXPORTER_OTLP_ENDPOINT, _HEADERS, _METRICS
+service-b  OPENAI_API_KEY + the shared STAGE, OTEL_EXPORTER_OTLP_ENDPOINT, _HEADERS, _METRICS
 logged     OTEL_EXPORTER_OTLP_HEADERS → <redacted>
 missing    ConfigError: SchemaError(Expected string at ["STRIPE_API_KEY"])
 ```
@@ -1532,7 +1563,7 @@ reads them back at runtime.
 
 <CodeFile path="internal-util/InternalEnv.ts" label="crosshatch (trimmed)">
 
-```ts {all|2-6|8-9|13}
+```ts {all|2-6|8-9|13-15}
 export const InternalEnv = Effect.gen(function* () {
   const CHX_INTERNAL_STAGE = yield* Alchemy.Stage.pipe(
     Effect.flatMap(S.decodeUnknownEffect(ChxStage.Stage)),
@@ -1545,7 +1576,9 @@ export const InternalEnv = Effect.gen(function* () {
     OTEL_EXPORTER_OTLP_ENDPOINT: Config.string("OTEL_EXPORTER_OTLP_ENDPOINT"),
     OTEL_EXPORTER_OTLP_HEADERS: Config.redacted("OTEL_EXPORTER_OTLP_HEADERS"),
     OTEL_TRACES_EXPORTER: Config.succeed("otlp"),
-    OTEL_METRICS_EXPORTER: CHX_INTERNAL_STAGE.pipe(Config.map((v) => (v.startsWith("dev_") ? "none" : "otlp"))),
+    OTEL_METRICS_EXPORTER: CHX_INTERNAL_STAGE.pipe(
+      Config.map((v) => (v.startsWith("dev_") ? "none" : "otlp")),
+    ),
   })
 })
 ```
@@ -1583,16 +1616,22 @@ Run the same AI effect in parallel, with a different model for each run.
 
 <CodeFile path="models.ts" label="Layers">
 
-```ts {all|1-3|5-8|9}
+```ts {all|1-3|5-12|14-15}
 const anthropic = AnthropicClient.layerConfig({ apiKey: Config.Redacted("ANTHROPIC_API_KEY") })
 const openai = OpenAiClient.layerConfig({ apiKey: Config.Redacted("OPENAI_API_KEY") })
 const openrouter = OpenRouterClient.layerConfig({ apiKey: Config.Redacted("OPENROUTER_API_KEY") })
 
-const sonnet = AnthropicLanguageModel.layer({ model: "claude-sonnet-5-5" }).pipe(Layer.provide(anthropic))
-const opus = AnthropicLanguageModel.layer({ model: "claude-opus-5-5" }).pipe(Layer.provide(anthropic))
-const gpt = OpenAiLanguageModel.layer({ model: "gpt-6.1-sol" }).pipe(Layer.provide(openai))
-const gemini = OpenRouterLanguageModel.layer({ model: "google/gemini-2.5-flash" }).pipe(Layer.provide(openrouter))
-const judge = OpenRouterDecisionModel.layer({ model: "~typesafe/jev-latest" }).pipe(Layer.provide(openrouter))
+const sonnet = AnthropicLanguageModel.layer({ model: "claude-sonnet-5-5" })
+  .pipe(Layer.provide(anthropic))
+const opus = AnthropicLanguageModel.layer({ model: "claude-opus-5-5" })
+  .pipe(Layer.provide(anthropic))
+const gpt = OpenAiLanguageModel.layer({ model: "gpt-6.1-sol" })
+  .pipe(Layer.provide(openai))
+const gemini = OpenRouterLanguageModel.layer({ model: "google/gemini-2.5-flash" })
+  .pipe(Layer.provide(openrouter))
+
+const judge = OpenRouterDecisionModel.layer({ model: "~typesafe/jev-latest" })
+  .pipe(Layer.provide(openrouter))
 ```
 
 </CodeFile>
@@ -1759,7 +1798,7 @@ A schema whose values describe schemas. It's deliberately flat, so every provide
 
 <CodeFile path="hydrate.ts" label="Implementation">
 
-```ts {all|1-7|9-11|11}
+```ts {all|1-7|9-13|13}
 const types = {
   string: S.String,
   number: S.Finite,
@@ -1769,8 +1808,10 @@ const types = {
 } as const
 
 const hydrate = ({ title, fields }: typeof Shape.Type) =>
-  S.Struct(Object.fromEntries(fields.map((f) => [f.name, types[f.type].annotate({ description: f.description })])))
-    .annotate({ title })
+  S.Struct(Object.fromEntries(fields.map((f) => [
+    f.name,
+    types[f.type].annotate({ description: f.description }),
+  ]))).annotate({ title })
 ```
 
 </CodeFile>
@@ -1787,15 +1828,17 @@ const hydrate = ({ title, fields }: typeof Shape.Type) =>
 
 # Two steps
 
-```ts {all|2-5|6|7-10}
+```ts {all|4-7|8|9-12}
+const world = "a story world of sprites, vampires, witches and mermaids"
+
 const program = Effect.gen(function* () {
   const { value: shape } = yield* LanguageModel.generateObject({
-    prompt: "Describe the metadata worth tracking for a story world of sprites, vampires, witches and mermaids.",
+    prompt: `Describe the metadata worth tracking for ${world}.`,
     schema: Shape,
   })
   const StoryWorld = hydrate(shape)
   const { value } = yield* LanguageModel.generateObject({
-    prompt: "Invent a story world of sprites, vampires, witches and mermaids.",
+    prompt: `Invent ${world}.`,
     schema: StoryWorld,
   })
   return value
@@ -1820,22 +1863,24 @@ const program = Effect.gen(function* () {
   "title": "StoryWorld",
   "properties": {
     "name": { "type": "string", "description": "The world's name" },
-    "peoples": { "type": "array", "items": { "type": "string" }, "description": "The peoples who live there" },
+    "peoples": {
+      "type": "array", "items": { "type": "string" }, "description": "The peoples who live there"
+    },
     "magicLevel": { "type": "number", "description": "How common magic is, from 0 to 10" },
     "hasSunlight": { "type": "boolean", "description": "Whether the sun ever rises" }
   },
-  "required": ["name", "peoples", "magicLevel", "hasSunlight"],
-  "additionalProperties": false
+  "required": ["name", "peoples", "magicLevel", "hasSunlight"], "additionalProperties": false
 }
 ```
 
 ```txt
-→ {"name":"Hollowtide","peoples":["sprites","vampires","witches","mermaids"],"magicLevel":8,"hasSunlight":false}
+→ {"name":"Hollowtide","peoples":["sprites","vampires","witches","mermaids"],
+   "magicLevel":8,"hasSunlight":false}
 ```
 
 <v-click>
 
-The model's own field descriptions come back to it as part of the schema, and the answer is decoded against it like any other.
+The model's own field descriptions come back to it, and the answer is decoded against them.
 
 </v-click>
 
@@ -1846,31 +1891,532 @@ Reordered "title" to the top for readability.
 
 ---
 
-# Why not raw JSON Schema?
+# Takeaway
+
+> Give the model a small, closed vocabulary for describing schemas, and hydrate its answer into a real `Schema`.
+
+<p class="drop-cap">Because a schema is just a value, the shape of one response can come from another. Keep the metaschema flat so every provider enforces it, and validate everything that comes back.</p>
+
+---
+layout: chapter
+chapter: XI
+accent: blue
+---
+
+# Capabilities in metadata
+
+Name a capability with a tag in your data. Whoever provides its layer gets the feature.
+
+---
+
+# Tags are cheap
+
+```ts
+type Adapter = (deployment: Deployment) => Effect.Effect<Payload>
+
+class Erc3009 extends Context.Service<Erc3009, Adapter>()("Erc3009") {}
+class Permit2 extends Context.Service<Permit2, Adapter>()("Permit2") {}
+class SolanaTransfer extends Context.Service<SolanaTransfer, Adapter>()("SolanaTransfer") {}
+```
+
+<v-clicks>
+
+- A tag is a key and a type, with no implementation attached
+- So it can go anywhere a value can, including plain data
+- Each one names a pluggable interface: a way to pay
+
+</v-clicks>
+
+---
+
+# Metadata names capabilities
+
+<CodeFile path="crosshatch/Known/EUR/EURC.ts" label="crosshatch (trimmed)">
+
+```ts {all|5|14}
+export const eip155 = {
+  8453: {
+    asset: Eip155Asset.Eip155Asset.make("0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42", …),
+    decimals: 6,
+    schemes: [Erc3009Scheme.Erc3009Scheme, Permit2Scheme.Permit2Scheme],
+  },
+  // … Ethereum, Cronos, World Chain, Avalanche
+} as const satisfies References
+
+export const solana = {
+  "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": {
+    asset: SolanaAsset.SolanaAsset.make("HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr", …),
+    decimals: 6,
+    schemes: [SolanaScheme.SolanaScheme],
+    // …
+  },
+} as const satisfies References
+```
+
+</CodeFile>
+
+<!--
+Each deployment of EURC lists the payment schemes it can settle through, as tags.
+The asset table says nothing about how to implement them.
+-->
+
+---
+
+# Optional, not required
+
+````md magic-move
+```ts
+const adapter = yield* Erc3009
+// Effect<Adapter, never, Erc3009>  →  must be provided
+```
+```ts
+const adapter = yield* Effect.serviceOption(Erc3009)
+// Effect<Option<Adapter>>  →  may be provided
+```
+````
+
+<v-click at="1">
+
+`yield*` on a tag makes it a requirement the type system enforces. `serviceOption` turns it into a question asked at runtime, so code that walks the metadata can ask about any capability without requiring one.
+
+</v-click>
+
+---
+
+# Discover what's provided
+
+```ts {all|3|4|5-7|10}
+const pay = Effect.fn(function* (deployments: Record<string, Deployment>) {
+  for (const [network, deployment] of Object.entries(deployments)) {
+    for (const scheme of deployment.schemes) {
+      const adapter = yield* Effect.serviceOption(scheme)
+      if (Option.isSome(adapter)) {
+        return { network, scheme: scheme.key, payload: yield* adapter.value(deployment) }
+      }
+    }
+  }
+  return yield* new NoSupportedScheme()
+})
+```
+
+<!--
+1. Walk the tags the metadata lists.
+2. serviceOption asks the context whether that capability was provided.
+3. The first provided one wins.
+4. Nothing provided is a typed failure, not a crash.
+-->
+
+---
+
+# Provide to opt in
+
+```ts
+pay(EURC).pipe(Effect.provide(Layer.mergeAll(layerErc3009, layerPermit2)))
+```
 
 ```txt
-                              Anthropic   OpenAI     Problem
-raw JSON Schema (S.Json)      accepted    accepted   unenforced; invalid ones accept anything
-recursive metaschema          rejected    accepted   not portable
-flat metaschema               accepted    accepted   —
+erc3009 + permit2     eip155:8453 via Erc3009
+permit2 only          eip155:8453 via Permit2
+solana only           solana:5eykt4Us… via SolanaTransfer
+nothing               NoSupportedScheme
 ```
 
 <v-click>
 
-`SchemaRepresentation.fromJsonSchemaDocument` assumes its input is valid. Given `{ "type": "objekt" }`, it quietly imports a schema that accepts everything. Constrain what the model writes, then build the schema yourself.
+The same program, four behaviours. Which layers you provide *is* the configuration: no flags, no registry, no list of enabled schemes to keep in sync.
 
 </v-click>
 
 <!--
-All checked offline on Effect 4.1.2, running each provider's own structured-output
-transformer. The importer does keep real constraints (minimum became a check) and
-rejects regex patterns by default, so it's a fine target once step one is enforced.
+Real output on Effect 4.1.2.
 -->
 
 ---
 
 # Takeaway
 
-> Give the model a small, closed vocabulary for describing schemas, and hydrate its answer into a real `Schema`.
+> Put capability tags in your metadata, and ask the context which ones were provided.
 
-<p class="drop-cap">Because a schema is just a value, the shape of one response can come from another. Keep the metaschema flat so every provider enforces it, and validate everything that comes back.</p>
+<p class="drop-cap">Tags are cheap enough to live in plain data, layers decide what's actually supported, and <code>Effect.serviceOption</code> lets one program adapt to whatever it was given.</p>
+
+---
+layout: chapter
+chapter: XII
+accent: gold
+---
+
+# An iframe as an RPC server
+
+Keep secrets on another origin, and talk to them with typed RPC.
+
+---
+
+# Why an iframe
+
+```txt
+merchant.example (host page)                  link.crosshatch.dev/enclave (hidden iframe)
+
+FacadeClient ─ RpcClient ─ port1   ⇄   port2 ─ RpcServer ─ handlers  (keys live here)
+```
+
+<v-clicks>
+
+- The enclave holds keys and signs payments; the host page is any merchant's site
+- The browser's same-origin policy keeps the host out of the enclave's storage
+- `postMessage` carries untyped data, but we want typed requests, errors and streams
+
+</v-clicks>
+
+---
+
+# One contract, two packages
+
+<CodeFile path="crosshatch/Browser/FacadeRpcGroup.ts" label="crosshatch">
+
+```ts {all|8-14}
+export class FacadeRpcGroup extends RpcGroup.make(
+  Rpc.make("StreamState", {
+    success: FacadeState,
+    stream: true,
+  }),
+  Rpc.make("Rescind", {}),
+  Rpc.make("CreateTrace", { payload: Bridge.TraceConfig }),
+  Rpc.make("Propose", {
+    payload: Bridge.Proposal,
+    success: S.Struct({
+      payload: Payload.Payload,
+    }),
+    error: BrowserProposeError,
+  }),
+) {}
+```
+
+</CodeFile>
+
+<!--
+The library defines the contract. The host imports it to build a client; the internal
+app imports the same group to implement the server. One schema per call, including a
+streaming one and a typed error.
+-->
+
+---
+
+# The handshake
+
+```txt
+host     mounts a hidden, sandboxed iframe at link.crosshatch.dev/enclave
+iframe   parent.postMessage(RequestFacadeIntroduction)               "I'm ready"
+host     checks the origin, creates a MessageChannel
+host     iframe.postMessage(FacadeIntroduction, origin, [port2])    "here's your end"
+both     speak Effect's worker RPC protocol over port1 ⇄ port2
+```
+
+<v-click>
+
+A `MessagePort` is exactly what a Web Worker talks over. So Effect's *worker* RPC protocol works unchanged, and the iframe just becomes the worker.
+
+</v-click>
+
+---
+
+# The host side
+
+<CodeFile path="crosshatch/Browser/FacadeWorker.ts" label="crosshatch (trimmed)">
+
+```ts {all|3-9|10-15|16}
+export const layer = Effect.gen(function* () {
+  const { url } = yield* ChxEnv.ChxEnv
+  const requested = yield* BrowserStream.fromEventListenerWindow("message").pipe(
+    Stream.filter(({ data, origin }) =>
+      origin.startsWith(url({ sub: "link" })) && S.is(RequestFacadeIntroduction)(data)),
+    Stream.take(1),
+    Stream.runDrain,
+    Effect.forkScoped,
+  )
+  const iframe = document.createElement("iframe")
+  Object.assign(iframe, {
+    sandbox: "allow-scripts allow-same-origin",
+    src: url({ sub: "link", pathname: "enclave" }),
+  })
+  document.body.appendChild(iframe)
+  yield* Fiber.join(requested)
+  // …
+```
+
+</CodeFile>
+
+<!--
+1. Listen first, so the iframe's request can't be missed. Only accept it from the link origin.
+2. Mount the hidden iframe. (Trimmed: the real code also sets an id, a 1×1 size and
+   off-screen styles.)
+3. Wait for "I'm ready".
+-->
+
+---
+
+# Hand over a port
+
+<CodeFile path="crosshatch/Browser/FacadeWorker.ts" label="crosshatch (continued)">
+
+```ts {all|2-4|5|6|7-12}
+  // …
+  const context = yield* Effect.fromNullishOr(iframe.contentWindow)
+  const { port1, port2 } = new MessageChannel()
+  context.postMessage(FacadeIntroduction.make({}), url({ sub: "link" }), [port2])
+  yield* Effect.addFinalizer(() => Effect.sync(() => iframe.remove()))
+  return BrowserWorker.layer(() => port1)
+}).pipe(
+  Effect.retry(
+    Schedule.exponential("100 millis", 2).pipe(Schedule.jittered, Schedule.upTo({ times: 6 })),
+  ),
+  Layer.unwrap,
+)
+```
+
+</CodeFile>
+
+<!--
+1. Transfer port2 to the iframe, addressed to the link origin only.
+2. The iframe's lifetime is the layer's lifetime.
+3. Hand port1 to Effect as if it were a worker.
+4. Flaky mount? Retry the whole handshake with jittered backoff, then unwrap into a layer.
+-->
+
+---
+zoom: 0.9
+---
+
+# The iframe side
+
+<CodeFile path="internal/app/routes/enclave/-serveFacade.ts" label="crosshatch/internal (trimmed)">
+
+```ts {all|2-12|13|14|15-19}
+export const serveFacade = Effect.gen(function* () {
+  const deferred = yield* Deferred.make<MessagePort>()
+  const scope = yield* Scope.make()
+  yield* BrowserStream.fromEventListenerWindow("message").pipe(
+    Stream.runForEach(Effect.fn(function* ({ data, ports: [port] }) {
+      if (port && S.is(FacadeIntroduction)(data)) {
+        yield* Deferred.succeed(deferred, port)
+        yield* Scope.close(scope, Exit.void)
+      }
+    })),
+    Effect.forkIn(scope, { startImmediately: true }),
+  )
+  parent.postMessage(RequestFacadeIntroduction.make({}), "*")
+  const port = yield* Deferred.await(deferred)
+  return yield* RpcServer.layer(FacadeRpcGroup).pipe(
+    Layer.provide([layerStreamState, layerCreateTrace, layerPropose, layerRescind,
+      RpcServer.layerProtocolWorkerRunner.pipe(Layer.provide(BrowserWorkerRunner.layerMessagePort(port)))]),
+    Layer.launch,
+  )
+})
+```
+
+</CodeFile>
+
+<!--
+1. Listen for the introduction in a scope of its own, and close that scope as soon as
+   the port arrives, so the listener doesn't outlive its job.
+2. "I'm ready." The message carries no data, so "*" is fine here.
+3. Wait for the port.
+4. Serve the same group over it. layerPropose is where the user reviews and signs.
+-->
+
+---
+
+# The client is ordinary
+
+<CodeFile path="crosshatch/Browser/FacadeClient.ts" label="crosshatch">
+
+```ts {all|2|4}
+export class FacadeClient extends Context.Service<FacadeClient>()("crosshatch/FacadeClient", {
+  make: RpcClient.make(FacadeRpcGroup),
+}) {
+  static readonly layer = Layer.effect(this, this.make).pipe(
+    Layer.provide(
+      RpcClient.layerProtocolWorker({ size: 1 }).pipe(Layer.provide(FacadeWorker.layer)),
+    ),
+  )
+}
+```
+
+</CodeFile>
+
+```ts
+const client = yield* FacadeClient
+const { payload } = yield* client.Propose(proposal) // typed success, typed error
+```
+
+<v-click>
+
+Everything iframe-specific lives in one layer. Code that uses the client just sees typed RPC.
+
+</v-click>
+
+<!--
+Checked on Effect 4.1.2 with @effect/platform-browser 4.1.2: a real RpcClient and
+RpcServer joined only by a MessageChannel, no iframe. Request/response and streaming
+both work. The protocol only ever sees a port.
+-->
+
+---
+
+# Takeaway
+
+> Put sensitive code behind an origin boundary, and connect to it with the same RPC you'd use for a worker.
+
+<p class="drop-cap">The library owns the contract and the client layer, the iframe owns the implementation, and a transferred <code>MessagePort</code> is all that joins them. Everything else is ordinary Effect: schemas, typed errors, streams and scopes.</p>
+
+---
+layout: chapter
+chapter: XIII
+accent: green
+---
+
+# Layers that register
+
+Providing a layer can fill an implicit registry, instead of providing a service.
+
+---
+
+# A registry nobody has to provide
+
+```ts
+type Handler = (input: string) => Effect.Effect<string>
+
+class HandlerRegistry extends Context.Reference<Map<string, Handler>>("app/HandlerRegistry", {
+  defaultValue: () => new Map(),
+}) {}
+```
+
+<v-clicks>
+
+- A `Context.Reference` always has a value, so `yield* HandlerRegistry` never fails
+- The value is a plain, mutable `Map`
+- Anything that yields it sees the same instance
+
+</v-clicks>
+
+---
+
+# A layer that provides nothing
+
+<CodeFile path="layerHandler.ts" label="Implementation">
+
+```ts {all|3|4-5|6}
+const layerHandler = <R>(name: string, f: (input: string) => Effect.Effect<string, never, R>) =>
+  Effect.gen(function* () {
+    const registry = yield* HandlerRegistry
+    const context = yield* Effect.context<R>()
+    registry.set(name, flow(f, Effect.provideContext(context)))
+    return Layer.empty
+  }).pipe(Layer.unwrap)
+```
+
+</CodeFile>
+
+<!--
+1. Grab the implicit registry.
+2. Store the handler with its context captured (Chapter IV), so whoever calls it later
+   doesn't need to provide its dependencies.
+3. The layer's output is empty. Building it is the whole point.
+-->
+
+---
+
+# Look up late
+
+```ts
+const dispatch = Effect.fn(function* (name: string, input: string) {
+  const registry = yield* HandlerRegistry
+  const handler = registry.get(name)
+  return handler ? yield* handler(input) : `no handler for "${name}"`
+})
+
+const upper = layerHandler("upper", (s) => Effect.succeed(s.toUpperCase()))
+dispatch("upper", "hi").pipe(Effect.provide(upper)) // "HI"
+```
+
+<v-click>
+
+Providing `upper` adds no service. It adds an entry to a `Map` the consumer already holds. Look entries up when a handler is actually needed, and layer order stops mattering.
+
+</v-click>
+
+<!--
+Layer order: a consumer built before the handler layer and one built after both found
+the handler. Checked with a Payer-like consumer that captures the registry at build time and looks
+handlers up at call time, merged with the handler layer in both orders.
+-->
+
+---
+
+# In the wild
+
+<CodeFile path="crosshatch/Extension.ts · crosshatch/Payer.ts" label="crosshatch (trimmed)">
+
+```ts {all|1-5|7-12|14-16}
+export class ExtensionRegistry extends Context.Reference<
+  Map<Extension.Any, (payload: ExtensionHandlerConfig<any>) => Effect.Effect<unknown>>
+>("crosshatch/ExtensionRegistry", {
+  defaultValue: () => new Map(),
+}) {}
+
+export const layerHandler = Effect.fnUntraced(function* (extension, f) {
+  const registry = yield* ExtensionRegistry
+  const context = yield* Effect.context<R>()
+  registry.set(extension, flow(f, Effect.provide(Layer.succeedContext(context)), Effect.scoped))
+  return Layer.empty
+}, Layer.unwrap)
+
+// Payer.layerLocal: holds the Map, looks extensions up per payload
+const registry = yield* ExtensionRegistry
+const extension = registry.entries().find(([extension]) => extension.identifier === identifier)
+```
+
+</CodeFile>
+
+<!--
+Clients answer x402 extension requests by providing Extension.layerHandler(...) layers
+next to Payer.layerLocal. Trimmed: the real layerHandler is generic over the extension's
+types. The Effect.scoped placement here is the Chapter IV trap: the captured layer
+Scope shadows it.
+-->
+
+---
+
+# Sharp edges
+
+```txt
+a separate run, no handler layer      "HI"         the default Map is shared by the whole process
+a run with a fresh Map                "no handler"
+after the registering layer closes    ["shout"]    the handler is still there
+```
+
+<v-click>
+
+```ts
+// one registry per app, or per test
+program.pipe(Effect.provide(Layer.succeed(HandlerRegistry, new Map())))
+
+// unregister when the layer's scope closes
+registry.set(name, handler)
+yield* Effect.addFinalizer(() => Effect.sync(() => registry.delete(name)))
+```
+
+</v-click>
+
+<!--
+Effect 4.1.2 caches a Reference's default on the Reference itself, so `defaultValue`
+runs once and every run that doesn't provide its own value shares it. All three rows
+are real output; the finalizer version leaves the Map empty after the run.
+-->
+
+---
+
+# Takeaway
+
+> Let a layer register into an implicit, `Context.Reference`-backed registry, and look entries up when they're needed.
+
+<p class="drop-cap">Providing the layer becomes the act of plugging something in. Just remember the default is one shared map: provide a fresh one per app or test, and unregister on scope close if layers come and go.</p>

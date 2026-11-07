@@ -570,6 +570,19 @@ const program = Effect.gen(function* () {
   Effect.provide(TraitsConfig.layer),
 )
 ```
+```ts {5}
+const program = Effect.gen(function* () {
+  const chat = yield* Chat.Chat
+  yield* chat.generateText({ prompt: "Let's review some code." })
+  yield* Effect.all(
+    ["security", "performance", "design"].map(flow(review, branch)),
+    { concurrency: "unbounded" },
+  )
+}).pipe(
+  Effect.provideServiceEffect(Chat.Chat, Chat.empty),
+  Effect.provide(TraitsConfig.layer),
+)
+```
 ````
 
 <v-click at="1">
@@ -583,6 +596,7 @@ Same review function as "Sharing one chat". Checked on Effect 4.1.2 with a stub
 model: each expert's question saw 5 messages (the 2 shared, its role turn, its
 question), and the outer chat stayed at 2.
 Provide an empty Chat to start, and the LanguageModel from Chapter II's TraitsConfig.layer.
+Last step: branch is just a function from effect to effect, so it composes with flow.
 -->
 
 ---
@@ -591,7 +605,7 @@ Provide an empty Chat to start, and the LanguageModel from Chapter II's TraitsCo
 
 > Because the chat is a service, branching a conversation is just providing a different one.
 
-<p class="drop-cap">Since <code>Effect.provideServiceEffect</code> scopes the replacement to a single effect, code that uses the chat never knows. Concurrency and history isolation come from Effect itself rather than from the AI library.</p>
+<p class="drop-cap">Since <code>Effect.provideServiceEffect</code> scopes the replacement to a single effect, code that uses the chat never knows. Concurrency and history isolation come from the Effect primitives you already know.</p>
 
 ---
 layout: chapter
@@ -628,18 +642,16 @@ Usually we never think about this. A child effect inherits whatever its caller h
 
 # Stored, not yielded
 
-```ts {1-5|8-9|12-15}
+```ts {1-5|7-8|10-13}
 class Hooks extends Context.Reference<
   Map<string, (payload: string) => Effect.Effect<void>>
 >("app/Hooks", {
   defaultValue: () => new Map(),
 }) {}
 
-// at startup
 const hooks = yield* Hooks
 hooks.set("order.placed", saveOrder) // ✗ Effect<void, never, Database> is not Effect<void>
 
-// much later, inside the server
 const dispatch = Effect.fn(function* (event: string, payload: string) {
   const hook = (yield* Hooks).get(event)
   if (hook) yield* hook(payload)
@@ -648,7 +660,7 @@ const dispatch = Effect.fn(function* (event: string, payload: string) {
 
 <v-click>
 
-The hook is registered at one point in the lifecycle and run at another, by code with a different context. The type error is right: nobody will be there to provide `Database`.
+The hook is registered at one point in the lifecycle and run at another, by code with a different context.
 
 </v-click>
 
@@ -658,20 +670,10 @@ The hook is registered at one point in the lifecycle and run at another, by code
 
 <CodeFile path="Hooks.ts" label="Implementation">
 
-```ts {all|7|8|13}
-export const layerHook = Effect.fnUntraced(function* <R>(
-  name: string,
-  f: (payload: string) => Effect.Effect<void, never, R>,
-) {
-  const hooks = yield* Hooks
-
-  const context = yield* Effect.context<R>()
-  hooks.set(name, flow(f, Effect.provideContext(context)))
-  return Layer.empty
-}, Layer.unwrap)
-
-// R is tracked on the layer, so it's provided like anything else
-layerHook("order.placed", saveOrder).pipe(Layer.provide(Database.layer))
+```ts {all|2|3}
+const hooks = yield* Hooks
+const context = yield* Effect.context<R>()
+hooks.set(name, flow(f, Effect.provideContext(context)))
 ```
 
 </CodeFile>
@@ -679,53 +681,23 @@ layerHook("order.placed", saveOrder).pipe(Layer.provide(Database.layer))
 <!--
 1. While the layer is being built, grab the context the hook will need.
 2. Store a version of the hook that brings its own context along.
-3. The hook's requirements become the layer's requirements, so the type system
-   still makes sure Database is provided.
--->
-
----
-
-# In the wild
-
-<CodeFile path="crosshatch/Extension.ts" label="crosshatch">
-
-```ts {all|12|13|14}
-export const layerHandler = Effect.fnUntraced(function* <
-  Self,
-  Id extends string,
-  Identifier extends string,
-  Info extends Extension.Info,
-  Enrichment extends Extension.Enrichment<Info>,
-  R,
->(
-  extension: Extension<Self, Id, Identifier, Info, Enrichment>,
-  f: (payload: ExtensionHandlerConfig<Info>) => Effect.Effect<Enrichment["Type"], never, R>,
-) {
-  const registry = yield* ExtensionRegistry
-  const context = yield* Effect.context<R>()
-  registry.set(extension, flow(f, Effect.provide(Layer.succeedContext(context)), Effect.scoped))
-  return Layer.empty
-}, Layer.unwrap)
-```
-
-</CodeFile>
-
-<!--
-Same shape: a client registers extension handlers at startup, and the payer calls them
-later while building a payment payload. Note the Effect.scoped at the end; we'll
-come back to it.
+This runs inside layerHook, a layer that registers the hook while it's built. The
+hook's requirements become the layer's requirements, so the type system still makes
+sure Database is provided:
+  layerHook("order.placed", saveOrder).pipe(Layer.provide(Database.layer))
 -->
 
 ---
 
 # What gets captured
 
-```ts {1|2|4-5}
-const context = yield* Effect.context<Database>() // typed Context<Database>…
-                                                   // …but holds everything in scope
+```ts {1-2|4-5|6}
+const context = yield* Effect.context<Database>()
+// propagates `Database` requirement to outer effect
 
-const onlyDb = Context.pick(Database)(context)     // holds just Database
-const noScope = Context.omit(Scope.Scope)(context) // everything but the Scope
+const onlyDb = Context.pick(Database)(context)       // holds just Database
+const noScope = Context.omit(Scope.Scope)(context)   // everything but the Scope
+saveOrder("o_1").pipe(Effect.provideContext(onlyDb)) // Effect<void>: Database is provided
 ```
 
 <v-clicks>
@@ -745,51 +717,46 @@ still showed up inside the stored effect. With Context.pick it didn't.
 
 # The Scope trap
 
-```ts {1|3-6|8-9}
-flow(f, Effect.provideContext(context), Effect.scoped)
-
+````md magic-move
+```ts {all|1-4|6-7}
 const auditOrder = Effect.fn(function* (payload: string) {
   yield* Effect.acquireRelease(open(payload), () => close(payload))
   yield* saveOrder(payload)
 })
 
-// after one dispatch:   open o_1, insert o_1
-// after app shutdown:   open o_1, insert o_1, close o_1
+const context = yield* Effect.context<Database>()
+hooks.set("order.placed", flow(auditOrder, Effect.provideContext(context), Effect.scoped))
 ```
+```ts {7}
+const auditOrder = Effect.fn(function* (payload: string) {
+  yield* Effect.acquireRelease(open(payload), () => close(payload))
+  yield* saveOrder(payload)
+})
 
-<v-click>
-
-The context was captured while the layer was being built, so it includes the *layer's* `Scope`. That captured `Scope` shadows the fresh one from `Effect.scoped`, and every resource a hook opens stays open until the app shuts down.
-
-</v-click>
-
----
-
-# Order matters
-
-````md magic-move
-```ts
-flow(f, Effect.provideContext(context), Effect.scoped)
-
-// after one dispatch:   open o_1, insert o_1
-// after app shutdown:   open o_1, insert o_1, close o_1
-```
-```ts
-flow(f, Effect.scoped, Effect.provideContext(context))
-
-// after one dispatch:   open o_1, insert o_1, close o_1
+const context = yield* Effect.context<Database>()
+hooks.set("order.placed", flow(auditOrder, Effect.scoped, Effect.provideContext(context)))
 ```
 ````
 
-<v-click at="1">
+<v-click at="2">
 
-The innermost provide wins. Providing the fresh `Scope` first, closest to `f`, gives each call its own, while everything else still comes from the captured context.
+`Effect.context()` captured the layer's `Scope` along with `Database`. With `provideContext` inside `Effect.scoped`, the captured `Scope` shadows the fresh one, so whatever a hook acquires stays open until the app shuts down.
+
+</v-click>
+
+<v-click at="3">
+
+Swap them. The innermost provide wins, so the fresh `Scope` sits closest to `auditOrder` and each call releases what it acquired.
 
 </v-click>
 
 <!--
-Both orderings type-check, which is what makes this easy to miss. Verified by running
-both against Effect 4.1.2.
+1. A hook that acquires a resource per call and should release it when the call ends.
+2. Registered while the layer is being built, with its context captured, and scoped
+   so each call gets its own Scope. Or so it looks: on Effect 4.1.2, close only runs
+   when the app's layers are torn down.
+3. Swap the order. Now each dispatch logs open, insert, close. Both orderings
+   type-check, which is what makes this easy to miss. Verified by running both.
 -->
 
 ---
@@ -798,7 +765,7 @@ both against Effect 4.1.2.
 
 > When an effect runs outside the fiber that defined it, capture its context explicitly, and choose what goes with it.
 
-<p class="drop-cap">Grab the context with <code>Effect.context</code> where the effect is defined, and re-provide it where it runs. Since it captures everything in scope, decide what to leave behind with <code>Context.pick</code> or <code>Context.omit</code>, or by ordering, and keep the <code>Scope</code> local to each run.</p>
+<p class="drop-cap">Grab the context with <code>Effect.context</code> where the effect is defined, and re-provide it where it runs. Since it captures all of the fiber's services, decide what to leave behind with <code>Context.pick</code> or <code>Context.omit</code>, or by ordering, and keep the <code>Scope</code> local to each run.</p>
 
 ---
 layout: chapter
@@ -818,8 +785,8 @@ Let a domain error decide how it becomes an HTTP response.
 
 ```ts {all|1-5|6-9}
 const getUser = Effect.gen(function* () {
-  const { id } = yield* HttpRouter.params
-  const user = yield* findUser(id!)
+  const { id } = yield* HttpRouter.schemaPathParams(S.Struct({ id: S.String }))
+  const user = yield* findUser(id)
   return yield* HttpServerResponse.json(user)
 }).pipe(
   Effect.catchTag("UserNotFound", (e) =>
@@ -829,9 +796,7 @@ const getUser = Effect.gen(function* () {
 
 <v-clicks>
 
-- Every handler repeats the same mapping
 - Forget one, and a domain error turns into a 500
-- The wire format drifts from route to route
 
 </v-clicks>
 
@@ -867,8 +832,8 @@ export class UserNotFound extends Data.TaggedError("UserNotFound")<{ readonly id
 
 ```ts {3}
 const getUser = Effect.gen(function* () {
-  const { id } = yield* HttpRouter.params
-  const user = yield* findUser(id!) // may fail with UserNotFound
+  const { id } = yield* HttpRouter.schemaPathParams(S.Struct({ id: S.String }))
+  const user = yield* findUser(id) // may fail with UserNotFound
   return yield* HttpServerResponse.json(user)
 })
 ```
@@ -933,40 +898,6 @@ export class Forbidden extends Data.TaggedError("Forbidden")<{ readonly reason: 
 `effect/http` ships RFC 9457 Problem Details, so errors can share one `application/problem+json` shape.
 
 </v-click>
-
----
-
-# In the wild
-
-<CodeFile path="crosshatch/ChxHttp.ts" label="crosshatch (trimmed)">
-
-```ts {all|10|11-13|16}
-export class PaymentRequired
-  extends Data.TaggedError("PaymentRequired")<{
-    readonly required: Required
-    readonly request: HttpServerRequest.HttpServerRequest
-  }>
-  implements HttpServerRespondable.Respondable
-{
-  [HttpServerRespondable.symbol]() {
-    return Effect.gen({ self: this }, function* () {
-      const traceInfo = yield* /* current span's trace + span ids, if any */
-      const required = yield* S.encodeEffect(RequiredFromBase64JsonString)(this.required)
-      const headers = { [PAYMENT_REQUIRED]: required, ...traceInfo }
-      return HttpServerResponse.empty({ status: 402, headers })
-    })
-  }
-  override readonly [ErrorReporter.ignore] = true
-}
-```
-
-</CodeFile>
-
-<!--
-An x402 402 Payment Required. Rendering can itself be effectful: it reads the current
-span for trace headers and schema-encodes the payment requirements into a header.
-Handlers just call require(...), which yields this error.
--->
 
 ---
 
@@ -1124,55 +1055,6 @@ export const replace = Effect.fn(function* (directory: string, name: string, con
 
 ---
 
-# Racing writers
-
-```txt
-                     10 concurrent creates of race.md
-check, then write    10 report success      file holds whoever finished last
-stage, then link      1 succeeds            9 get FileAlreadyExists
-```
-
-<v-click>
-
-The atomic version doesn't need a lock or a retry. The file system's own `link` decides the winner.
-
-</v-click>
-
----
-
-# In the wild
-
-<CodeFile path="traits/TraitStore.ts" label="Traits">
-
-```ts {all|2-5|7|8-15|16}
-Effect.gen(function* () {
-  const directory = yield* fs.makeTempDirectoryScoped({
-    directory: traitsDirectory,
-    prefix: ".traits-write-",
-  })
-  const temporary = path.join(directory, `${trait.name}.md`)
-  yield* fs.writeFileString(temporary, Trait.serialize(trait))
-  yield* fs.link(temporary, traitPath(trait.name)).pipe(
-    Effect.catchTags({
-      PlatformError: (error) =>
-        error.reason._tag === "AlreadyExists"
-          ? TraitAlreadyExistsError.make({ traitName: trait.name })
-          : error,
-    }),
-  )
-}).pipe(Effect.scoped)
-```
-
-</CodeFile>
-
-<!--
-Traits stores each trait as a Markdown file that a watcher reacts to. The staging prefix
-doesn't end in .md, so the watcher never sees the half-written copy. Same shape as our
-create; catchReason is the shorter way to write that catchTags.
--->
-
----
-
 # Takeaway
 
 > Write somewhere private, then publish with one atomic file-system call.
@@ -1202,7 +1084,7 @@ Define the fields once, and extract a schema for each place they're used.
 export declare const make: …
 ```
 
-Every export of `VariantSchema` is marked `@stability unstable`, and so is `Model`, which is built on it. The API may still change.
+Every export of `VariantSchema` is marked `@stability unstable`. The API may still change.
 
 <v-click>
 
@@ -1219,19 +1101,19 @@ Model.d.ts say unstable.
 
 # One record, three shapes
 
-<p class="eyebrow">A user row in the database</p>
+<p class="eyebrow">A user, as stored, created and returned</p>
 
 ```txt
-           id    email    passwordHash    displayName    createdAt
-select     ✓     ✓        ✓               ✓              ✓
-insert           ✓        ✓               optional
-update           ✓        ✓               optional
+           id    email    passwordHash    createdAt
+select     ✓     ✓        ✓               ✓
+insert           ✓        ✓
+json       ✓     ✓                        ✓
 ```
 
 <v-clicks>
 
-- The database generates `id` and `createdAt`, so they only come back on `select`
-- `displayName` has a database default, so writes may leave it out
+- The database generates `id` and `createdAt`, so an insert never includes them
+- `passwordHash` is stored, but never sent to clients
 - Three schemas that have to agree on every other field
 
 </v-clicks>
@@ -1240,33 +1122,28 @@ update           ✓        ✓               optional
 
 # Define once
 
-```ts {all|1-4|7|8-9|10-14|17-19}
+```ts {all|1-4|7,10|8|9|12-14}
 const variants = VariantSchema.make({
-  variants: ["select", "insert", "update"],
+  variants: ["select", "insert", "json"],
   defaultVariant: "select",
 })
 
 const fields = variants.Struct({
-  id: S.Number.pipe(variants.FieldOnly(["select"])),
+  id: S.Number.pipe(variants.FieldOnly(["select", "json"])),
   email: S.String,
-  passwordHash: S.String,
-  displayName: variants.Field({
-    select: S.String,
-    insert: S.optional(S.String),
-    update: S.optional(S.String),
-  }),
-  createdAt: S.DateTimeUtc.pipe(variants.FieldOnly(["select"])),
+  passwordHash: S.String.pipe(variants.FieldOnly(["select", "insert"])),
+  createdAt: S.DateTimeUtc.pipe(variants.FieldOnly(["select", "json"])),
 })
 export const User = variants.extract(fields, "select")
 export const UserInsert = variants.extract(fields, "insert")
-export const UserUpdate = variants.extract(fields, "update")
+export const UserJson = variants.extract(fields, "json")
 ```
 
 <!--
 1. Name the variants once. VariantSchema comes from effect/schema.
-2. FieldOnly: id only exists when reading.
+2. Generated by the database: read back and returned, never inserted.
 3. A plain schema belongs to every variant.
-4. Field gives each variant its own schema: required on select, optional on writes.
+4. Sensitive: stored and written, never returned.
 5. Extract an ordinary Schema.Struct per variant.
 -->
 
@@ -1275,29 +1152,29 @@ export const UserUpdate = variants.extract(fields, "update")
 # What you get
 
 ```ts
-typeof User.Type        // { id, email, passwordHash, displayName, createdAt }
-typeof UserInsert.Type  // { email, passwordHash, displayName? }
-typeof UserUpdate.Type  // { email, passwordHash, displayName? }
+typeof User.Type        // { id, email, passwordHash, createdAt }
+typeof UserInsert.Type  // { email, passwordHash }
+typeof UserJson.Type    // { id, email, createdAt }
 
-const insert: UserInsert = { id: 1, email, passwordHash } // ✗ id is not part of an insert
-S.decodeUnknownSync(UserInsert)({ id: 9, email, passwordHash })  // { email, passwordHash }
+const insert: UserInsert = { id: 1, email, passwordHash } // ✗ id is generated by the database
+S.encodeSync(UserJson)(user)                              // { id, email, createdAt }
 ```
 
 <v-clicks>
 
 - Three ordinary `Schema.Struct`s, typed separately
-- Sending a generated column on a write is a type error
-- Decoding a write strips anything the variant doesn't declare
+- Sending a generated column on an insert is a type error
+- Encoding a response with `UserJson` leaves `passwordHash` behind
 
 </v-clicks>
 
 <!--
-All checked on Effect 4.1.2, including a @ts-expect-error on an insert with an id.
-Like Model, the update variant leaves id out; the id goes in the WHERE clause.
+Schemas only emit the fields they declare, so encoding a full User row with UserJson
+drops passwordHash. Model, next, adds update and the json create/update variants.
 
 If asked "why not derive them?": mapFields(Struct.omit(…)) handles one field missing
-from one variant, but with three variants and per-variant optionality the rules spread
-across several derivations. A variant field keeps the decision next to the field.
+from one variant, but with several variants the rules spread across several
+derivations. A variant field keeps the decision next to the field.
 -->
 
 ---
@@ -1315,9 +1192,12 @@ class User extends Model.Class<User>("User")({
 ```
 
 ```txt
-User.select       id, email, passwordHash      User.json         id, email
-User.insert       email, passwordHash          User.jsonCreate   email
-User.update       email, passwordHash          User.jsonUpdate   email
+User.select       id, email, passwordHash
+User.insert       email, passwordHash
+User.update       email, passwordHash
+User.json         id, email
+User.jsonCreate   email
+User.jsonUpdate   email
 ```
 
 <v-click>
@@ -1325,38 +1205,6 @@ User.update       email, passwordHash          User.jsonUpdate   email
 Six variants from one declaration. The id never goes into an insert, and the password hash never leaves the server.
 
 </v-click>
-
----
-
-# A field is a variant map
-
-<CodeFile path="effect/schema/Model.ts" label="Effect">
-
-```ts {all|1-4|6-10}
-export const GeneratedByDb = (schema) => Field({
-  select: schema,
-  json: schema,
-})
-
-export const Sensitive = (schema) => Field({
-  select: schema,
-  insert: schema,
-  update: schema,
-})
-```
-
-</CodeFile>
-
-<v-click>
-
-`Field` maps each variant to a schema, so a field can be absent from some variants or even take a different schema in each. `FieldOnly` is shorthand for the same schema in a few of them.
-
-</v-click>
-
-<!--
-Simplified from the compiled source: the real definitions add types. Model's variants
-are select, insert, update, json, jsonCreate and jsonUpdate, with select as the default.
--->
 
 ---
 

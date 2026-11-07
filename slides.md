@@ -1222,7 +1222,7 @@ accent: gold
 
 # Shared configuration
 
-One typed definition of the environment, shared by every service and by the code that deploys them.
+One typed definition of the shared environment
 
 ---
 
@@ -1240,7 +1240,6 @@ service-b     ✓       ✓                         ✓
 
 - Every service needs the stage and the telemetry settings
 - Each one adds secrets of its own
-- Reading `process.env` in each package drifts the moment one changes
 
 </v-clicks>
 
@@ -1316,58 +1315,18 @@ const { STRIPE_API_KEY, STAGE } = yield* ServiceAEnv   // Redacted<string>, Stag
 const stripe = new Stripe(Redacted.value(STRIPE_API_KEY))
 ```
 
-```txt
-service-a  STRIPE_API_KEY + the shared STAGE, OTEL_EXPORTER_OTLP_ENDPOINT, _HEADERS, _METRICS
-service-b  OPENAI_API_KEY + the shared STAGE, OTEL_EXPORTER_OTLP_ENDPOINT, _HEADERS, _METRICS
-logged     OTEL_EXPORTER_OTLP_HEADERS → <redacted>
-missing    ConfigError: SchemaError(Expected string at ["STRIPE_API_KEY"])
-```
-
 <v-clicks>
 
 - One typed object per service, shared fields included
-- Secrets stay redacted until you explicitly unwrap them
 - A missing variable fails at startup, naming the key
 
 </v-clicks>
 
 <!--
-Real output on Effect 4.1.2 with ConfigProvider.fromUnknown.
--->
-
----
-
-# Mind the order
-
-````md magic-move
-```ts
-make: SharedEnv.pipe(
-  Effect.map(Struct.assign({ STRIPE_API_KEY: Config.Redacted("STRIPE_API_KEY") })),
-)
-// STRIPE_API_KEY is still a Config, not a Redacted
-```
-```ts
-make: Effect.gen(function* () {
-  const shared = yield* SharedEnv
-  return yield* Config.all({ STRIPE_API_KEY: Config.Redacted("STRIPE_API_KEY") }).pipe(
-    Effect.map(Struct.assign(shared)),
-  )
-})
-// STRIPE_API_KEY is a Redacted<string>
-```
-````
-
-<v-click at="1">
-
-Merging `Config`s into already-resolved values never reads them. Resolve the service's own `Config.all` first, then merge the shared values in.
-
-</v-click>
-
-<!--
-Both checked at runtime: the first leaves an unresolved Config object in the service.
-link/LinkEnv.ts at this revision has the first shape; nothing reads its own fields
-yet, so it's latent. Under Alchemy it likely also means those keys are never bound
-to the Worker, since only Configs read during init are.
+Checked on Effect 4.1.2 with ConfigProvider.fromUnknown: each service's object has
+its own key plus the shared ones, a logged OTEL_EXPORTER_OTLP_HEADERS prints as
+<redacted>, and a missing STRIPE_API_KEY fails with
+ConfigError: SchemaError(Expected string at ["STRIPE_API_KEY"]).
 -->
 
 ---
@@ -1407,37 +1366,79 @@ reads them back at runtime.
 
 ---
 
-# In the wild
+# Secrets into GitHub
 
-<CodeFile path="internal-util/InternalEnv.ts" label="crosshatch (trimmed)">
+<CodeFile path="bootstrap.ts" label="Run once, locally">
 
-```ts {all|2-6|8-9|13-15}
-export const InternalEnv = Effect.gen(function* () {
-  const CHX_INTERNAL_STAGE = yield* Alchemy.Stage.pipe(
-    Effect.flatMap(S.decodeUnknownEffect(ChxStage.Stage)),
-    Effect.orDie,
-    Effect.map(Config.succeed),
-  )
-  return yield* Config.all({
-    CHX_INTERNAL_STAGE,
-    VITE_PUBLIC_CHX_INTERNAL_STAGE: CHX_INTERNAL_STAGE,
-    OTEL_EXPORTER_OTLP_ENDPOINT: Config.string("OTEL_EXPORTER_OTLP_ENDPOINT"),
-    OTEL_EXPORTER_OTLP_HEADERS: Config.redacted("OTEL_EXPORTER_OTLP_HEADERS"),
-    OTEL_TRACES_EXPORTER: Config.succeed("otlp"),
-    OTEL_METRICS_EXPORTER: CHX_INTERNAL_STAGE.pipe(
-      Config.map((v) => (v.startsWith("dev_") ? "none" : "otlp")),
-    ),
-  })
-})
+```ts {all|3|4-10}
+export default Alchemy.Stack(
+  "ci-secrets",
+  { state: Cloudflare.state(), providers: GitHub.providers() },
+  GitHub.Secrets({
+    owner: "crosshatch", repository: "monorepo",
+    secrets: {
+      CLOUDFLARE_API_TOKEN: Config.Redacted("CLOUDFLARE_API_TOKEN"),
+      STRIPE_API_KEY: Config.Redacted("STRIPE_API_KEY"),
+      OPENAI_API_KEY: Config.Redacted("OPENAI_API_KEY"),
+    },
+  }),
+)
 ```
 
 </CodeFile>
 
+<v-click>
+
+`alchemy deploy bootstrap.ts` reads your local `.env`, and each `Config.Redacted` becomes a GitHub Actions secret on the repo.
+
+</v-click>
+
 <!--
-1. The stage comes from the Alchemy stack itself, validated against ChxStage.Stage.
-2. The same stage is exposed to the Vite frontend under a VITE_PUBLIC_ name.
-3. Derived values. (Trimmed: OTEL_LOGS_EXPORTER is set the same way as traces.)
-This repo is on an Effect 4 RC, where the constructors are still lowercase.
+1. A tiny stack of its own: state in Cloudflare, GitHub as the only provider.
+2. GitHub.Secrets accepts Configs and resolves them at deploy time, so the values come
+   from .env and are never written in the file.
+Imports: alchemy, @alchemy.run/cloudflare, @alchemy.run/github (2.0.0-beta.85; the
+GitHub and Cloudflare modules moved out of "alchemy/GitHub" and "alchemy/Cloudflare").
+Non-secret values like the Cloudflare account id go in GitHub.Variables the same way.
+crosshatch's bootstrap.ts also mints a scoped Cloudflare deploy token
+(Cloudflare.ApiToken.AccountApiToken) instead of copying one from .env.
+-->
+
+---
+
+# Deploy from CI
+
+<CodeFile path=".github/workflows/deploy.yml" label="Every push">
+
+```yaml {all|4-5}
+- run: pnpm alchemy deploy service-a/alchemy.run.ts --stage production
+  env:
+    CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    STRIPE_API_KEY: ${{ secrets.STRIPE_API_KEY }}
+```
+
+</CodeFile>
+
+<v-click>
+
+```txt
+.env  →  GitHub secret  →  workflow env  →  Worker secret  →  yield* ServiceAEnv
+```
+
+</v-click>
+
+<v-click>
+
+It's the same `Config.Redacted("STRIPE_API_KEY")` all the way down: the bootstrap reads it from `.env`, the deploy from the workflow's env, and the Worker from its own env at runtime.
+
+</v-click>
+
+<!--
+1. The workflow maps repo secrets into the deploy step's environment.
+2. At deploy, Alchemy binds every Config the Worker's init reads (previous slide) onto
+   the Worker as a secret; at runtime ServiceAEnv resolves from there.
+Nobody copies a secret by hand after the bootstrap, and a key missing anywhere in the
+chain fails with a ConfigError naming it.
 -->
 
 ---
@@ -1498,7 +1499,7 @@ const judge = OpenRouterDecisionModel.layer({ model: "~typesafe/jev-latest" })
 ```ts {1-3|5-10|10}
 const idea = LanguageModel.generateText({
   prompt: "Suggest one idea for a venue for the next Effect Miami meetup",
-}).pipe(Effect.map(({ text }) => text))
+}).pipe(Effect.map((v) => v.text))
 
 const ideas = yield* Effect.all({
   sonnet: idea.pipe(Effect.provide(sonnet)),
@@ -1585,6 +1586,193 @@ typed. The real wiring type-checks with nothing left to provide.
 ---
 layout: chapter
 chapter: X
+accent: green
+---
+
+# Decision models overview
+
+Four kinds of question a model can answer with a typed answer instead of prose.
+
+---
+
+# Classify
+
+<p class="eyebrow">Pick exactly one label</p>
+
+```ts {all|4-11|15-17}
+const RouteTicket = Decision.make({
+  input: S.Struct({ subject: S.String, body: S.String }),
+  decisions: {
+    team: Decision.classify({
+      instructions: "Which team should handle this ticket?",
+      criteria: {
+        billing: "Charges, refunds, invoices, payment methods",
+        technical: "Bugs, errors, outages, integrations",
+        sales: "Pricing, plans, upgrades, demos",
+      },
+    }),
+  },
+})
+
+const { answers } = yield* DecisionModel.decide(RouteTicket, { input: ticket })
+answers.team.label          // "billing" | "technical" | "sales"
+answers.team.probabilities  // e.g. { billing: 0.94, technical: 0.04, sales: 0.02 }
+```
+
+<!--
+1. For routing: one of several unordered buckets.
+2. The criteria are the labels; descriptions tell the model what each means. Use null
+   when a label explains itself, as in PickVenue. At least two labels.
+3. The label is typed, and you get a probability for every label, not just the winner.
+-->
+
+---
+
+# Rate
+
+<p class="eyebrow">A point on an ordered scale</p>
+
+```ts {all|6-10|15-17}
+const AssessReport = Decision.make({
+  input: S.Struct({ report: S.String }),
+  decisions: {
+    severity: Decision.rate({
+      instructions: "How severe is the reported issue?",
+      criteria: [
+        "cosmetic",
+        { label: "degraded", description: "Broken, but a workaround exists" },
+        { label: "blocking", description: "No workaround exists" },
+      ],
+    }),
+  },
+})
+
+const { answers } = yield* DecisionModel.decide(AssessReport, { input: { report } })
+answers.severity.label   // the most likely level, e.g. "degraded"
+answers.severity.rating  // e.g. 1.3: between degraded (1) and blocking (2)
+```
+
+<!--
+1. For severity, sentiment, quality: anything where "more" means something.
+2. Levels go from lowest to highest. A level is a plain string (label and description
+   in one) or { label, description }; descriptions can be structured JSON.
+3. Unlike classify, rating is probability-weighted and can fall between levels:
+   1.3 is "degraded, leaning blocking".
+-->
+
+---
+
+# Probability
+
+<p class="eyebrow">How likely a statement is</p>
+
+```ts {all|5|6-9|14-15}
+const Screen = Decision.make({
+  input: S.Struct({ message: S.String }),
+  decisions: {
+    urgent: Decision.probability({
+      instructions: "The message is time-sensitive",
+      criteria: {
+        true: "Someone needs to act within the hour",
+        false: "It can wait until the next business day",
+      },
+    }),
+  },
+})
+
+const { answers } = yield* DecisionModel.decide(Screen, { input: { message } })
+if (answers.urgent.probability > 0.8) yield* pageOnCall(message)
+```
+
+<v-click at="3">
+
+You get a number, not a boolean, so the threshold is a decision your code makes.
+
+</v-click>
+
+<!--
+1. A statement, not a question.
+2. Optional, but if you describe the outcomes, describe both.
+3. The cutoff lives in your code, where you can tune it.
+-->
+
+---
+
+# Locate
+
+<p class="eyebrow">Find one thing in an image</p>
+
+```ts {all|2|5|4|9-10}
+const CheckListing = Decision.make({
+  input: S.Struct({ title: S.String, photo: Decision.Image }),
+  decisions: {
+    hasPlate: Decision.probability({ instructions: "`photo` shows a car's license plate" }),
+    plate: Decision.locate({ image: "photo", instructions: "the license plate" }),
+  },
+})
+
+const { answers } = yield* DecisionModel.decide(CheckListing, { input: listing })
+if (answers.hasPlate.probability > 0.5) yield* blur(listing.photo, answers.plate.box)
+```
+
+<v-click at="3">
+
+`locate` always returns one box, even when there's nothing to find, so pair it with a `probability` that the target is there.
+
+</v-click>
+
+<!--
+1. Decision.Image marks an image field; images are sent to the provider separately.
+2. image is the field's path in the encoded input, and can go deep: "frames[2].frame".
+   It needs a model created with supportsLocate: true.
+3. The pairing the Effect docs recommend.
+4. The box is { left, top, right, bottom }, as fractions of the image from the top-left.
+-->
+
+---
+
+# Several at once
+
+```ts {all|3-9|12-14}
+const Triage = Decision.make({
+  input: Ticket,
+  decisions: {
+    team: Decision.classify({
+      instructions: "Which team?", criteria: { billing: null, technical: null },
+    }),
+    severity: Decision.rate({ instructions: "How severe?", criteria: ["low", "medium", "high"] }),
+    urgent: Decision.probability({ instructions: "The ticket is time-sensitive" }),
+  },
+})
+
+const { outcomes } = yield* DecisionModel.decideSettled(Triage, { input: ticket })
+if (Result.isSuccess(outcomes.urgent)) outcomes.urgent.success.probability
+else outcomes.urgent.failure.reason // "Missing" | "Refused" | "NoDistribution" | "Invalid"
+```
+
+<v-click at="2">
+
+One call answers all three. `decide` fails unless every decision is answered; `decideSettled` returns a `Result` for each, so one refusal doesn't cost you the rest.
+
+</v-click>
+
+<!--
+1. Mix any of the four kinds in one definition, asked about the same input.
+2. decideSettled: each outcome is a Result of the answer or Unanswered with a reason.
+All five examples type-check on Effect 4.1.2. Probabilities shown are illustrative.
+-->
+
+---
+
+# Takeaway
+
+> Ask the model a typed question, and get back a typed answer with its probabilities.
+
+<p class="drop-cap">Use <code>classify</code> for one of several labels, <code>rate</code> for a point on an ordered scale, <code>probability</code> for a yes-or-no likelihood, and <code>locate</code> for a box in an image. Combine them in one <code>Decision.make</code>, and reach for <code>decideSettled</code> when a partial answer is still useful.</p>
+
+---
+layout: chapter
+chapter: XI
 accent: plum
 ---
 
@@ -1612,7 +1800,7 @@ generateObject({ schema: hydrated })  →  a value, validated against that schem
 
 ---
 
-# The metaschema
+# A naive "metaschema"
 
 <CodeFile path="Shape.ts" label="Metaschema">
 
@@ -1630,7 +1818,7 @@ const Shape = S.Struct({ title: S.String, fields: S.Array(Field) })
 
 <v-click>
 
-A schema whose values describe schemas. It's deliberately flat, so every provider's structured-output mode accepts it and enforces it.
+A schema whose values describe schemas.
 
 </v-click>
 
@@ -1743,11 +1931,11 @@ Reordered "title" to the top for readability.
 
 > Give the model a small, closed vocabulary for describing schemas, and hydrate its answer into a real `Schema`.
 
-<p class="drop-cap">Because a schema is just a value, the shape of one response can come from another. Keep the metaschema flat so every provider enforces it, and validate everything that comes back.</p>
+<p class="drop-cap">Because a schema is just a value, the shape of one response can come from another.</p>
 
 ---
 layout: chapter
-chapter: XI
+chapter: XII
 accent: blue
 ---
 
@@ -1889,7 +2077,7 @@ Real output on Effect 4.1.2.
 
 ---
 layout: chapter
-chapter: XII
+chapter: XIII
 accent: gold
 ---
 
@@ -2118,7 +2306,7 @@ both work. The protocol only ever sees a port.
 
 ---
 layout: chapter
-chapter: XIII
+chapter: XIV
 accent: green
 ---
 

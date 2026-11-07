@@ -249,3 +249,13 @@ html.dark {
 .history .dot.coral { background: var(--coral); }
 .history .dot.green { background: var(--green); }
 .history .dot.plum { background: var(--plum); }
+
+/* Screenshots, framed like code blocks. */
+.slidev-layout img.shot {
+  display: block;
+  max-width: 100%;
+  max-height: 22rem;
+  margin: 0 auto;
+  border: 1px solid var(--rule-strong);
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--rule) 35%, transparent);
+}

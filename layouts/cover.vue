@@ -47,6 +47,9 @@ defineProps<{ eyebrow?: string; byline?: string; role?: string }>()
   font-style: italic;
   font-size: 1.25rem;
   color: var(--ink);
+  max-width: 38rem;
+  margin-inline: auto;
+  text-wrap: balance;
 }
 
 .byline {

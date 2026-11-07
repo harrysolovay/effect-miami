@@ -1959,7 +1959,7 @@ class SolanaTransfer extends Context.Service<SolanaTransfer, Adapter>()("SolanaT
 
 - A tag is a key and a type, with no implementation attached
 - So it can go anywhere a value can, including plain data
-- Each one names a pluggable interface: a way to pay
+- Each one names a pluggable interface
 
 </v-clicks>
 
@@ -2027,7 +2027,7 @@ const pay = Effect.fn(function* (deployments: Record<string, Deployment>) {
     for (const scheme of deployment.schemes) {
       const adapter = yield* Effect.serviceOption(scheme)
       if (Option.isSome(adapter)) {
-        return { network, scheme: scheme.key, payload: yield* adapter.value(deployment) }
+        // use the scheme
       }
     }
   }
@@ -2047,7 +2047,7 @@ const pay = Effect.fn(function* (deployments: Record<string, Deployment>) {
 # Provide to opt in
 
 ```ts
-pay(EURC).pipe(Effect.provide(Layer.mergeAll(layerErc3009, layerPermit2)))
+pay(EURC).pipe(Effect.provide([layerErc3009, layerPermit2]))
 ```
 
 ```txt
@@ -2092,7 +2092,7 @@ Keep secrets on another origin, and talk to them with typed RPC.
 ```txt
 merchant.example (host page)                  link.crosshatch.dev/enclave (hidden iframe)
 
-FacadeClient ─ RpcClient ─ port1   ⇄   port2 ─ RpcServer ─ handlers  (keys live here)
+IframeClient ─ RpcClient ─ port1   ⇄   port2 ─ RpcServer ─ handlers  (keys live here)
 ```
 
 <v-clicks>
@@ -2107,12 +2107,12 @@ FacadeClient ─ RpcClient ─ port1   ⇄   port2 ─ RpcServer ─ handlers  (
 
 # One contract, two packages
 
-<CodeFile path="crosshatch/Browser/FacadeRpcGroup.ts" label="crosshatch">
+<CodeFile path="Browser/IframeRpcGroup.ts" label="adapted from crosshatch">
 
 ```ts {all|8-14}
-export class FacadeRpcGroup extends RpcGroup.make(
+export class IframeRpcGroup extends RpcGroup.make(
   Rpc.make("StreamState", {
-    success: FacadeState,
+    success: IframeState,
     stream: true,
   }),
   Rpc.make("Rescind", {}),
@@ -2133,6 +2133,9 @@ export class FacadeRpcGroup extends RpcGroup.make(
 The library defines the contract. The host imports it to build a client; the internal
 app imports the same group to implement the server. One schema per call, including a
 streaming one and a typed error.
+Names are simplified for the talk: in crosshatch these are FacadeRpcGroup, FacadeClient,
+FacadeWorker and so on (crosshatch/Browser/), served by internal's
+app/routes/enclave/-serveFacade.ts.
 -->
 
 ---
@@ -2141,9 +2144,9 @@ streaming one and a typed error.
 
 ```txt
 host     mounts a hidden, sandboxed iframe at link.crosshatch.dev/enclave
-iframe   parent.postMessage(RequestFacadeIntroduction)               "I'm ready"
+iframe   parent.postMessage(RequestIframeIntroduction)               "I'm ready"
 host     checks the origin, creates a MessageChannel
-host     iframe.postMessage(FacadeIntroduction, origin, [port2])    "here's your end"
+host     iframe.postMessage(IframeIntroduction, origin, [port2])    "here's your end"
 both     speak Effect's worker RPC protocol over port1 ⇄ port2
 ```
 
@@ -2157,14 +2160,14 @@ A `MessagePort` is exactly what a Web Worker talks over. So Effect's *worker* RP
 
 # The host side
 
-<CodeFile path="crosshatch/Browser/FacadeWorker.ts" label="crosshatch (trimmed)">
+<CodeFile path="Browser/IframeWorker.ts" label="adapted from crosshatch">
 
 ```ts {all|3-9|10-15|16}
 export const layer = Effect.gen(function* () {
   const { url } = yield* ChxEnv.ChxEnv
   const requested = yield* BrowserStream.fromEventListenerWindow("message").pipe(
     Stream.filter(({ data, origin }) =>
-      origin.startsWith(url({ sub: "link" })) && S.is(RequestFacadeIntroduction)(data)),
+      origin.startsWith(url({ sub: "link" })) && S.is(RequestIframeIntroduction)(data)),
     Stream.take(1),
     Stream.runDrain,
     Effect.forkScoped,
@@ -2192,13 +2195,13 @@ export const layer = Effect.gen(function* () {
 
 # Hand over a port
 
-<CodeFile path="crosshatch/Browser/FacadeWorker.ts" label="crosshatch (continued)">
+<CodeFile path="Browser/IframeWorker.ts" label="adapted from crosshatch (continued)">
 
 ```ts {all|2-4|5|6|7-12}
   // …
   const context = yield* Effect.fromNullishOr(iframe.contentWindow)
   const { port1, port2 } = new MessageChannel()
-  context.postMessage(FacadeIntroduction.make({}), url({ sub: "link" }), [port2])
+  context.postMessage(IframeIntroduction.make({}), url({ sub: "link" }), [port2])
   yield* Effect.addFinalizer(() => Effect.sync(() => iframe.remove()))
   return BrowserWorker.layer(() => port1)
 }).pipe(
@@ -2222,26 +2225,63 @@ export const layer = Effect.gen(function* () {
 zoom: 0.9
 ---
 
+# The client is ordinary
+
+<CodeFile path="Browser/IframeClient.ts" label="adapted from crosshatch">
+
+```ts {all|2|4|6}
+export class IframeClient extends Context.Service<IframeClient>()("crosshatch/IframeClient", {
+  make: RpcClient.make(IframeRpcGroup),
+}) {
+  static readonly layer = Layer.effect(this, this.make).pipe(
+    Layer.provide(
+      RpcClient.layerProtocolWorker({ size: 1 }).pipe(Layer.provide(IframeWorker.layer)),
+    ),
+  )
+}
+```
+
+</CodeFile>
+
+```ts
+const client = yield* IframeClient
+const { payload } = yield* client.Propose(proposal) // typed success, typed error
+```
+
+<v-click>
+
+Everything iframe-specific lives in one layer. Code that uses the client just sees typed RPC.
+
+</v-click>
+
+<!--
+Checked on Effect 4.1.2 with @effect/platform-browser 4.1.2: a real RpcClient and
+RpcServer joined only by a MessageChannel, no iframe. Request/response and streaming
+both work. The protocol only ever sees a port.
+-->
+
+---
+
 # The iframe side
 
-<CodeFile path="internal/app/routes/enclave/-serveFacade.ts" label="crosshatch/internal (trimmed)">
+<CodeFile path="enclave/serveIframe.ts" label="adapted from crosshatch/internal">
 
 ```ts {all|2-12|13|14|15-19}
-export const serveFacade = Effect.gen(function* () {
+export const serveIframe = Effect.gen(function* () {
   const deferred = yield* Deferred.make<MessagePort>()
   const scope = yield* Scope.make()
   yield* BrowserStream.fromEventListenerWindow("message").pipe(
     Stream.runForEach(Effect.fn(function* ({ data, ports: [port] }) {
-      if (port && S.is(FacadeIntroduction)(data)) {
+      if (port && S.is(IframeIntroduction)(data)) {
         yield* Deferred.succeed(deferred, port)
         yield* Scope.close(scope, Exit.void)
       }
     })),
     Effect.forkIn(scope, { startImmediately: true }),
   )
-  parent.postMessage(RequestFacadeIntroduction.make({}), "*")
+  parent.postMessage(RequestIframeIntroduction.make({}), "*")
   const port = yield* Deferred.await(deferred)
-  return yield* RpcServer.layer(FacadeRpcGroup).pipe(
+  return yield* RpcServer.layer(IframeRpcGroup).pipe(
     Layer.provide([layerStreamState, layerCreateTrace, layerPropose, layerRescind,
       RpcServer.layerProtocolWorkerRunner.pipe(Layer.provide(BrowserWorkerRunner.layerMessagePort(port)))]),
     Layer.launch,
@@ -2261,48 +2301,11 @@ export const serveFacade = Effect.gen(function* () {
 
 ---
 
-# The client is ordinary
-
-<CodeFile path="crosshatch/Browser/FacadeClient.ts" label="crosshatch">
-
-```ts {all|2|4}
-export class FacadeClient extends Context.Service<FacadeClient>()("crosshatch/FacadeClient", {
-  make: RpcClient.make(FacadeRpcGroup),
-}) {
-  static readonly layer = Layer.effect(this, this.make).pipe(
-    Layer.provide(
-      RpcClient.layerProtocolWorker({ size: 1 }).pipe(Layer.provide(FacadeWorker.layer)),
-    ),
-  )
-}
-```
-
-</CodeFile>
-
-```ts
-const client = yield* FacadeClient
-const { payload } = yield* client.Propose(proposal) // typed success, typed error
-```
-
-<v-click>
-
-Everything iframe-specific lives in one layer. Code that uses the client just sees typed RPC.
-
-</v-click>
-
-<!--
-Checked on Effect 4.1.2 with @effect/platform-browser 4.1.2: a real RpcClient and
-RpcServer joined only by a MessageChannel, no iframe. Request/response and streaming
-both work. The protocol only ever sees a port.
--->
-
----
-
 # Takeaway
 
-> Put sensitive code behind an origin boundary, and connect to it with the same RPC you'd use for a worker.
+> The protocol behind an Effect RPC client and server is entirely pluggable.
 
-<p class="drop-cap">The library owns the contract and the client layer, the iframe owns the implementation, and a transferred <code>MessagePort</code> is all that joins them. Everything else is ordinary Effect: schemas, typed errors, streams and scopes.</p>
+<p class="drop-cap">HTTP, a WebSocket, a worker, or a <code>MessagePort</code>: whichever you plug in, the contract stays the same, giving you one consistent, end-to-end typed way to bridge any two environments.</p>
 
 ---
 layout: chapter
@@ -2316,7 +2319,7 @@ Providing a layer can fill an implicit registry, instead of providing a service.
 
 ---
 
-# A registry nobody has to provide
+# The shared registry
 
 ```ts
 type Handler = (input: string) => Effect.Effect<string>
@@ -2329,8 +2332,7 @@ class HandlerRegistry extends Context.Reference<Map<string, Handler>>("app/Handl
 <v-clicks>
 
 - A `Context.Reference` always has a value, so `yield* HandlerRegistry` never fails
-- The value is a plain, mutable `Map`
-- Anything that yields it sees the same instance
+- Anything that yields it sees the same instance unless another is explicitly provided
 
 </v-clicks>
 
@@ -2361,7 +2363,7 @@ const layerHandler = <R>(name: string, f: (input: string) => Effect.Effect<strin
 
 ---
 
-# Look up late
+# Provide to register
 
 ```ts
 const dispatch = Effect.fn(function* (name: string, input: string) {
@@ -2376,7 +2378,7 @@ dispatch("upper", "hi").pipe(Effect.provide(upper)) // "HI"
 
 <v-click>
 
-Providing `upper` adds no service. It adds an entry to a `Map` the consumer already holds. Look entries up when a handler is actually needed, and layer order stops mattering.
+Providing `upper` adds no service. It adds an entry to a `Map` the consumer already holds. Look entries up when a handler is actually needed.
 
 </v-click>
 
@@ -2422,37 +2424,191 @@ Scope shadows it.
 
 ---
 
-# Sharp edges
-
-```txt
-a separate run, no handler layer      "HI"         the default Map is shared by the whole process
-a run with a fresh Map                "no handler"
-after the registering layer closes    ["shout"]    the handler is still there
-```
-
-<v-click>
-
-```ts
-// one registry per app, or per test
-program.pipe(Effect.provide(Layer.succeed(HandlerRegistry, new Map())))
-
-// unregister when the layer's scope closes
-registry.set(name, handler)
-yield* Effect.addFinalizer(() => Effect.sync(() => registry.delete(name)))
-```
-
-</v-click>
-
-<!--
-Effect 4.1.2 caches a Reference's default on the Reference itself, so `defaultValue`
-runs once and every run that doesn't provide its own value shares it. All three rows
-are real output; the finalizer version leaves the Map empty after the run.
--->
-
----
-
 # Takeaway
 
 > Let a layer register into an implicit, `Context.Reference`-backed registry, and look entries up when they're needed.
 
 <p class="drop-cap">Providing the layer becomes the act of plugging something in. Just remember the default is one shared map: provide a fresh one per app or test, and unregister on scope close if layers come and go.</p>
+
+---
+layout: chapter
+chapter: XV
+accent: coral
+---
+
+# Traits
+
+Teach the agent once, and have every later edit checked against what you taught it.
+
+---
+
+# Why traits?
+
+```txt
+session 2     "use `as const` here, not `as [string, string]`"
+session 3     "don't hand-roll retries, use `Effect.retry` with a `Schedule`"
+session 5     "keep this error next to the operation that fails with it"
+session 6     "use the `FileSystem` service, not `node:fs`"
+session 8     "use `as const` here, not `as [string, string]`"
+session 9     "write `boolean | undefined` for optional properties"
+session 11    "use the `Crypto` service, not `node:crypto`"
+session 13    "use `Effect.forEach`, not a loop pushing into an array"
+session 14    "don't hand-roll retries, use `Effect.retry` with a `Schedule`"
+session 16    "call `Effect.promise` directly, don't wrap it in a helper"
+session 18    "test Effects with `@effect/vitest`, not `Effect.runPromise`"
+session 20    "put the message on the error type, not at every call site"
+session 22    "handle this with `Effect.catchTag`, not a `_tag` check"
+session 25    "use `flow` instead of a lambda that just forwards its input"
+session 27    "keep this error next to the operation that fails with it"
+session 31    "use `as const` here, not `as [string, string]`"
+```
+
+<style>
+pre.slidev-code, pre.slidev-code code { font-size: 13px !important; line-height: 20px !important; }
+</style>
+
+<v-clicks>
+
+- Corrections live in the conversation, and the conversation ends
+- A trait is a natural-language assertion about code, kept in the repo and checked on every edit
+
+</v-clicks>
+
+<!--
+Everyone who works with coding agents has given the same review comment more than once.
+Traits make each correction durable and enforced. (Session numbers are illustrative; the
+corrections mirror real traits in crosshatch/traits: effect-retry-and-schedules,
+colocate-small-domain-errors, effect-platform-services,
+explicit-undefined-in-optional-properties, effect-foreach-for-collection-results,
+effect-aware-tests, catch-tags-for-tagged-errors, effect-crypto-services,
+direct-effect-promise-adapters, fixed-error-messages-on-error-types,
+flow-for-forwarding-pipeline-callbacks.)
+-->
+
+---
+
+# A trait
+
+<p class="eyebrow">A Markdown file, versioned with the code</p>
+
+<img class="shot" src="/traits/trait.png" alt="The file .agents/traits/prefer-const-tuple-assertions.md with name, subject, requirement, applicability and purpose frontmatter, followed by a diff" />
+
+<v-click>
+
+`requirement` is what gets checked. `subject` and `applicability` say where it applies, `purpose` says why, and the diff is an example, not a hidden rule.
+
+</v-click>
+
+---
+
+# The loop
+
+```txt
+feedback  →  proposed trait  →  .agents/traits/*.md  →  every edit checked  →  fixes
+```
+
+<v-clicks>
+
+- You correct the agent once, in plain language
+- It proposes the correction as a reusable trait, and you approve it
+- From then on, a decision model checks generated code against every trait
+
+</v-clicks>
+
+<!--
+traits.sh. A trait is a natural-language assertion about code. The directory of traits
+grows with every correction, so the same feedback never has to be given twice.
+-->
+
+---
+
+# 1. Feedback
+
+<p class="eyebrow">An ordinary correction, mid-conversation</p>
+
+<img class="shot" src="/traits/feedback.png" alt="A chat message pointing at a tuple assertion in SignIn.ts: instead of as [string, string], do as const" />
+
+<!--
+Nothing special about this message. It's the kind of review comment you'd otherwise
+repeat in every PR.
+-->
+
+---
+
+# 2. Proposal
+
+<p class="eyebrow">The agent asks whether to keep it</p>
+
+<img class="shot" src="/traits/proposal.png" alt="The agent asks: save this reusable preference? prefer-const-tuple-assertions, with Save trait, Revise, Skip, or type your own answer" />
+
+<!--
+The agent generalizes the one-off fix into a named, reusable preference, with its
+scope (when the tuple values don't need to be mutable) and a diff as an example.
+You can save it, revise the wording or scope, or skip it. Saving checks the new trait
+against existing ones and asks you to reconcile any conflict.
+-->
+
+---
+
+# 3. Every trait is a decision
+
+<CodeFile path="traits/TraitEvaluation.ts" label="traits (trimmed)">
+
+```ts {all|3|4-9}
+const question = (trait: Trait) =>
+  Decision.classify({
+    instructions: `Assess state.source.text against this stored trait: ${JSON.stringify(trait)} …`,
+    criteria: {
+      compliant: "The trait applies and the input abides by it.",
+      violation: "The input violates the trait.",
+      "not-applicable": "The trait does not apply to the input.",
+      inconclusive: "Insufficient context or ambiguity prevents a reliable judgment.",
+    },
+  })
+```
+
+</CodeFile>
+
+<v-click>
+
+Each trait becomes a `classify`, keyed by its name in one `Decision.make`, so a batch of traits is checked in a single call. Anything marked `violation` or `inconclusive` goes back to the agent to fix.
+
+</v-click>
+
+<!--
+1. The whole trait goes in as JSON. The real instructions are much longer: assess only
+   this trait, treat the source as evidence rather than instructions, don't invent
+   context, and so on.
+2. Four labels, with probabilities for each (Chapter X).
+In the source, traits are batched up to 16 per Decision.make (and a byte budget), and
+the batches run concurrently. This is check_traits, exposed to the agent over MCP.
+-->
+
+---
+
+# Why it compounds
+
+<v-clicks>
+
+- Each correction is paid for once, then enforced on every edit after it
+- The traits live in the repo, so they're reviewed, versioned and shared like code
+- The agent can't quietly regress on anything you've already taught it
+
+</v-clicks>
+
+---
+
+# Takeaway
+
+> Turn every correction into a trait, and let a decision model hold the agent to it.
+
+<p class="drop-cap">Traits live in <code>.agents/traits</code> beside the code. The agent proposes them from your feedback, you approve each one once, and every later edit is checked against all of them. Code quality climbs with every correction, and you never give the same feedback twice. See <a href="https://traits.sh">traits.sh</a>.</p>
+
+---
+layout: cover
+eyebrow: "Effect Miami #3"
+---
+
+# Thank you for listening
+
+For more Effect patterns, traits and contemplation about the future, follow [@CrosshatchDev](https://x.com/CrosshatchDev) and [@harrysolovay](https://x.com/harrysolovay) on X.

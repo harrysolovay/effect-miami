@@ -57,12 +57,6 @@ class Clock extends Context.Service<Clock>()("app/Clock", {
 ```
 ````
 
-<v-click>
-
-`Context.Service<Self>()(id, …)` is a call that returns a class built from your arguments. Nothing stops *us* from writing functions with the same shape.
-
-</v-click>
-
 <!--
 This is a call that returns a class (S.TaggedError and S.Class work the same way).
 Self goes first in its own call because TypeScript can't infer some type arguments
@@ -150,7 +144,6 @@ export class PaymentFailed
 <v-clicks>
 
 - One declaration per event
-- The schema is declared right next to the event
 - `OrderPlaced.layer` and `OrderPlaced.schema` come with the class
 
 </v-clicks>
@@ -177,7 +170,7 @@ Effect.provide all just work.
 
 ---
 
-# Going public
+# Signature hygiene
 
 <p class="eyebrow">An explicit interface for a library API</p>
 
@@ -249,6 +242,13 @@ the interface, the error shows up here instead of at every call site.
 
 > Wrap `Context.Service` in a curried factory, and attach what every member of the family shares.
 
+```ts
+export class OrderPlaced extends Topic.Service<OrderPlaced>()("app/OrderPlaced", Order) {}
+
+OrderPlaced.layer   // the layer comes with the class
+OrderPlaced.schema  // so does the schema
+```
+
 <p class="drop-cap">Each member is declared in one line, yielded as an ordinary service, and carries its own schema and layer. The repetition lives in one function instead of every file.</p>
 
 ---
@@ -259,7 +259,7 @@ accent: gold
 
 # The Layer is the plugin
 
-No provider registry, no plugin system. The user hands the library a Layer.
+No provider registry, no plugin system, just layers.
 
 ---
 
@@ -396,11 +396,166 @@ A different provider or an internal gateway is just a different Layer in the use
 
 > Let users configure your library by handing it a Layer.
 
+```ts
+// traits.ts: the user's choice
+export default { layerLanguageModel } satisfies TraitsConfig
+
+// the library
+review.pipe(Effect.provide(TraitsConfig.layer))
+```
+
 <p class="drop-cap">The Layer is the extension point. Any implementation of the service works, along with whatever it depends on, and <code>S.declare</code> keeps the boundary validated and typed like any other input.</p>
 
 ---
 layout: chapter
 chapter: III
+accent: blue
+---
+
+# Capabilities in metadata
+
+Name a capability with a tag in your data. Whoever provides its layer gets the feature.
+
+---
+
+# Tags are cheap
+
+```ts
+type Adapter = (deployment: Deployment) => Effect.Effect<Payload>
+
+class Erc3009 extends Context.Service<Erc3009, Adapter>()("Erc3009") {}
+class Permit2 extends Context.Service<Permit2, Adapter>()("Permit2") {}
+class SolanaTransfer extends Context.Service<SolanaTransfer, Adapter>()("SolanaTransfer") {}
+```
+
+<v-clicks>
+
+- A tag is a key and a type, with no implementation attached
+- So it can go anywhere a value can, including plain data
+- Each one names a pluggable interface
+
+</v-clicks>
+
+---
+
+# Metadata names capabilities
+
+<CodeFile path="crosshatch/Known/EUR/EURC.ts" label="crosshatch (trimmed)">
+
+```ts {all|5|14}
+export const eip155 = {
+  8453: {
+    asset: Eip155Asset.Eip155Asset.make("0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42", …),
+    decimals: 6,
+    schemes: [Erc3009Scheme.Erc3009Scheme, Permit2Scheme.Permit2Scheme],
+  },
+  // … Ethereum, Cronos, World Chain, Avalanche
+} as const satisfies References
+
+export const solana = {
+  "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": {
+    asset: SolanaAsset.SolanaAsset.make("HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr", …),
+    decimals: 6,
+    schemes: [SolanaScheme.SolanaScheme],
+    // …
+  },
+} as const satisfies References
+```
+
+</CodeFile>
+
+<!--
+Each deployment of EURC lists the payment schemes it can settle through, as tags.
+The asset table says nothing about how to implement them.
+-->
+
+---
+
+# Optional, not required
+
+````md magic-move
+```ts
+const adapter = yield* Erc3009
+// Effect<Adapter, never, Erc3009>  →  must be provided
+```
+```ts
+const adapter = yield* Effect.serviceOption(Erc3009)
+// Effect<Option<Adapter>>  →  may be provided
+```
+````
+
+<v-click at="1">
+
+`yield*` on a tag makes it a requirement the type system enforces. `serviceOption` turns it into a question asked at runtime, so code that walks the metadata can ask about any capability without requiring one.
+
+</v-click>
+
+---
+
+# Discover what's provided
+
+```ts {all|3|4|5-7|10}
+const pay = Effect.fn(function* (deployments: Record<string, Deployment>) {
+  for (const [network, deployment] of Object.entries(deployments)) {
+    for (const scheme of deployment.schemes) {
+      const adapter = yield* Effect.serviceOption(scheme)
+      if (Option.isSome(adapter)) {
+        // use the scheme
+      }
+    }
+  }
+  return yield* new NoSupportedScheme()
+})
+```
+
+<!--
+1. Walk the tags the metadata lists.
+2. serviceOption asks the context whether that capability was provided.
+3. The first provided one wins.
+4. Nothing provided is a typed failure, not a crash.
+-->
+
+---
+
+# Provide to opt in
+
+```ts
+pay(EURC).pipe(Effect.provide([layerErc3009, layerPermit2]))
+```
+
+```txt
+erc3009 + permit2     eip155:8453 via Erc3009
+permit2 only          eip155:8453 via Permit2
+solana only           solana:5eykt4Us… via SolanaTransfer
+nothing               NoSupportedScheme
+```
+
+<v-click>
+
+The same program, four behaviours. Which layers you provide *is* the configuration: no flags, no registry, no list of enabled schemes to keep in sync.
+
+</v-click>
+
+<!--
+Real output on Effect 4.1.2.
+-->
+
+---
+
+# Takeaway
+
+> Put capability tags in your metadata, and ask the context which ones were provided.
+
+```ts
+const adapter = yield* Effect.serviceOption(scheme) // Option<Adapter>
+pay(EURC).pipe(Effect.provide([layerErc3009, layerPermit2]))
+```
+
+<p class="drop-cap">Tags are cheap enough to live in plain data, layers decide what's actually supported, and <code>Effect.serviceOption</code> lets one program adapt to whatever it was given.</p>
+
+---
+layout: chapter
+chapter: IV
 accent: green
 ---
 
@@ -605,11 +760,15 @@ Last step: branch is just a function from effect to effect, so it composes with 
 
 > Because the chat is a service, branching a conversation is just providing a different one.
 
+```ts
+["security", "performance", "design"].map(flow(review, branch))
+```
+
 <p class="drop-cap">Since <code>Effect.provideServiceEffect</code> scopes the replacement to a single effect, code that uses the chat never knows. Concurrency and history isolation come from the Effect primitives you already know.</p>
 
 ---
 layout: chapter
-chapter: IV
+chapter: V
 accent: coral
 ---
 
@@ -765,11 +924,16 @@ Swap them. The innermost provide wins, so the fresh `Scope` sits closest to `aud
 
 > When an effect runs outside the fiber that defined it, capture its context explicitly, and choose what goes with it.
 
+```ts
+const context = yield* Effect.context<Database>()
+hooks.set(name, flow(f, Effect.scoped, Effect.provideContext(context)))
+```
+
 <p class="drop-cap">Grab the context with <code>Effect.context</code> where the effect is defined, and re-provide it where it runs. Since it captures all of the fiber's services, decide what to leave behind with <code>Context.pick</code> or <code>Context.omit</code>, or by ordering, and keep the <code>Scope</code> local to each run.</p>
 
 ---
 layout: chapter
-chapter: V
+chapter: VI
 accent: plum
 ---
 
@@ -937,11 +1101,18 @@ handler failing with UserNotFound returns a real 404.
 
 > Give each expected failure its own response, and let handlers simply fail.
 
+```ts
+class UserNotFound extends Data.TaggedError("UserNotFound")<{ readonly id: string }> {
+  [HttpServerRespondable.symbol]() { return HttpServerResponse.json({ … }, { status: 404 }) }
+  readonly [ErrorReporter.ignore] = true
+}
+```
+
 <p class="drop-cap">Implement <code>Respondable</code> on the error, or annotate its schema with a status when using HttpApi. Mark expected failures with <code>ErrorReporter.ignore</code>, and keep them in the typed error channel all the way to the wire.</p>
 
 ---
 layout: chapter
-chapter: VI
+chapter: VII
 accent: blue
 ---
 
@@ -1059,11 +1230,17 @@ export const replace = Effect.fn(function* (directory: string, name: string, con
 
 > Write somewhere private, then publish with one atomic file-system call.
 
+```ts
+const staging = yield* fs.makeTempDirectoryScoped({ directory, prefix: ".write-" })
+yield* fs.writeFileString(staged, contents)
+yield* fs.link(staged, target) // create; fs.rename(staged, target) to replace
+```
+
 <p class="drop-cap">Stage beside the target with <code>makeTempDirectoryScoped</code>, publish with <code>link</code> to create or <code>rename</code> to replace, and let the <code>Scope</code> clean up however the write ends.</p>
 
 ---
 layout: chapter
-chapter: VII
+chapter: VIII
 accent: green
 ---
 
@@ -1179,7 +1356,7 @@ derivations. A variant field keeps the decision next to the field.
 
 ---
 
-# In the wild: Model
+# Model Variant Schema
 
 <p class="eyebrow">effect/schema/Model: the same idea, packaged</p>
 
@@ -1212,11 +1389,17 @@ Six variants from one declaration. The id never goes into an insert, and the pas
 
 > When one shape shows up in several places, declare its fields once and extract each variant.
 
+```ts
+passwordHash: S.String.pipe(variants.FieldOnly(["select", "insert"])),
+
+export const UserJson = variants.extract(fields, "json") // no passwordHash
+```
+
 <p class="drop-cap">Use <code>VariantSchema</code> to put the "which variants have this field" decision on the field itself. The extracted schemas are ordinary structs, with annotations and checks shared across every variant.</p>
 
 ---
 layout: chapter
-chapter: VIII
+chapter: IX
 accent: gold
 ---
 
@@ -1447,11 +1630,18 @@ chain fails with a ConfigError naming it.
 
 > Make the environment a service, built from a shared base that each package extends.
 
+```ts
+const shared = yield* SharedEnv
+return yield* Config.all({ STRIPE_API_KEY: Config.Redacted("STRIPE_API_KEY") }).pipe(
+  Effect.map(Struct.assign(shared)),
+)
+```
+
 <p class="drop-cap">Each package gets one typed, redacted, validated object, the shared fields are defined exactly once, and the code that deploys a service reads the same definition the service runs with.</p>
 
 ---
 layout: chapter
-chapter: IX
+chapter: X
 accent: coral
 ---
 
@@ -1508,12 +1698,6 @@ const ideas = yield* Effect.all({
   gpt: idea.pipe(Effect.provide(gpt)),
 }, { concurrency: "unbounded" })
 ```
-
-<v-click>
-
-`idea` is a description, not a call. Each copy asks for a `LanguageModel` when it runs, so providing a different model layer gives each one a different model.
-
-</v-click>
 
 <!--
 1. Built once. Nothing has run yet.
@@ -1581,11 +1765,18 @@ typed. The real wiring type-checks with nothing left to provide.
 
 > Write the AI effect once, then choose the model by what you provide to it.
 
+```ts
+yield* Effect.all({
+  sonnet: idea.pipe(Effect.provide(sonnet)),
+  gpt: idea.pipe(Effect.provide(gpt)),
+}, { concurrency: "unbounded" })
+```
+
 <p class="drop-cap">Every provider’s model is a layer for the same <code>LanguageModel</code> service, so comparing them is just <code>Effect.all</code> over copies with different layers. Keep the service lookup inside the effect, so each copy resolves its own.</p>
 
 ---
 layout: chapter
-chapter: X
+chapter: XI
 accent: green
 ---
 
@@ -1768,11 +1959,17 @@ All five examples type-check on Effect 4.1.2. Probabilities shown are illustrati
 
 > Ask the model a typed question, and get back a typed answer with its probabilities.
 
+```ts
+const { answers } = yield* DecisionModel.decide(RouteTicket, { input: ticket })
+answers.team.label          // "billing" | "technical" | "sales"
+answers.team.probabilities  // a probability for every label
+```
+
 <p class="drop-cap">Use <code>classify</code> for one of several labels, <code>rate</code> for a point on an ordered scale, <code>probability</code> for a yes-or-no likelihood, and <code>locate</code> for a box in an image. Combine them in one <code>Decision.make</code>, and reach for <code>decideSettled</code> when a partial answer is still useful.</p>
 
 ---
 layout: chapter
-chapter: XI
+chapter: XII
 accent: plum
 ---
 
@@ -1931,149 +2128,12 @@ Reordered "title" to the top for readability.
 
 > Give the model a small, closed vocabulary for describing schemas, and hydrate its answer into a real `Schema`.
 
+```ts
+const { value: shape } = yield* LanguageModel.generateObject({ prompt, schema: Shape })
+const { value } = yield* LanguageModel.generateObject({ prompt, schema: hydrate(shape) })
+```
+
 <p class="drop-cap">Because a schema is just a value, the shape of one response can come from another.</p>
-
----
-layout: chapter
-chapter: XII
-accent: blue
----
-
-# Capabilities in metadata
-
-Name a capability with a tag in your data. Whoever provides its layer gets the feature.
-
----
-
-# Tags are cheap
-
-```ts
-type Adapter = (deployment: Deployment) => Effect.Effect<Payload>
-
-class Erc3009 extends Context.Service<Erc3009, Adapter>()("Erc3009") {}
-class Permit2 extends Context.Service<Permit2, Adapter>()("Permit2") {}
-class SolanaTransfer extends Context.Service<SolanaTransfer, Adapter>()("SolanaTransfer") {}
-```
-
-<v-clicks>
-
-- A tag is a key and a type, with no implementation attached
-- So it can go anywhere a value can, including plain data
-- Each one names a pluggable interface
-
-</v-clicks>
-
----
-
-# Metadata names capabilities
-
-<CodeFile path="crosshatch/Known/EUR/EURC.ts" label="crosshatch (trimmed)">
-
-```ts {all|5|14}
-export const eip155 = {
-  8453: {
-    asset: Eip155Asset.Eip155Asset.make("0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42", …),
-    decimals: 6,
-    schemes: [Erc3009Scheme.Erc3009Scheme, Permit2Scheme.Permit2Scheme],
-  },
-  // … Ethereum, Cronos, World Chain, Avalanche
-} as const satisfies References
-
-export const solana = {
-  "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": {
-    asset: SolanaAsset.SolanaAsset.make("HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr", …),
-    decimals: 6,
-    schemes: [SolanaScheme.SolanaScheme],
-    // …
-  },
-} as const satisfies References
-```
-
-</CodeFile>
-
-<!--
-Each deployment of EURC lists the payment schemes it can settle through, as tags.
-The asset table says nothing about how to implement them.
--->
-
----
-
-# Optional, not required
-
-````md magic-move
-```ts
-const adapter = yield* Erc3009
-// Effect<Adapter, never, Erc3009>  →  must be provided
-```
-```ts
-const adapter = yield* Effect.serviceOption(Erc3009)
-// Effect<Option<Adapter>>  →  may be provided
-```
-````
-
-<v-click at="1">
-
-`yield*` on a tag makes it a requirement the type system enforces. `serviceOption` turns it into a question asked at runtime, so code that walks the metadata can ask about any capability without requiring one.
-
-</v-click>
-
----
-
-# Discover what's provided
-
-```ts {all|3|4|5-7|10}
-const pay = Effect.fn(function* (deployments: Record<string, Deployment>) {
-  for (const [network, deployment] of Object.entries(deployments)) {
-    for (const scheme of deployment.schemes) {
-      const adapter = yield* Effect.serviceOption(scheme)
-      if (Option.isSome(adapter)) {
-        // use the scheme
-      }
-    }
-  }
-  return yield* new NoSupportedScheme()
-})
-```
-
-<!--
-1. Walk the tags the metadata lists.
-2. serviceOption asks the context whether that capability was provided.
-3. The first provided one wins.
-4. Nothing provided is a typed failure, not a crash.
--->
-
----
-
-# Provide to opt in
-
-```ts
-pay(EURC).pipe(Effect.provide([layerErc3009, layerPermit2]))
-```
-
-```txt
-erc3009 + permit2     eip155:8453 via Erc3009
-permit2 only          eip155:8453 via Permit2
-solana only           solana:5eykt4Us… via SolanaTransfer
-nothing               NoSupportedScheme
-```
-
-<v-click>
-
-The same program, four behaviours. Which layers you provide *is* the configuration: no flags, no registry, no list of enabled schemes to keep in sync.
-
-</v-click>
-
-<!--
-Real output on Effect 4.1.2.
--->
-
----
-
-# Takeaway
-
-> Put capability tags in your metadata, and ask the context which ones were provided.
-
-<p class="drop-cap">Tags are cheap enough to live in plain data, layers decide what's actually supported, and <code>Effect.serviceOption</code> lets one program adapt to whatever it was given.</p>
 
 ---
 layout: chapter
@@ -2305,6 +2365,12 @@ export const serveIframe = Effect.gen(function* () {
 
 > The protocol behind an Effect RPC client and server is entirely pluggable.
 
+```ts
+RpcClient.layerProtocolHttp({ url })       // over HTTP
+RpcClient.layerProtocolSocket()            // over a WebSocket
+RpcClient.layerProtocolWorker({ size: 1 }) // over a worker or a MessagePort
+```
+
 <p class="drop-cap">HTTP, a WebSocket, a worker, or a <code>MessagePort</code>: whichever you plug in, the contract stays the same, giving you one consistent, end-to-end typed way to bridge any two environments.</p>
 
 ---
@@ -2356,7 +2422,7 @@ const layerHandler = <R>(name: string, f: (input: string) => Effect.Effect<strin
 
 <!--
 1. Grab the implicit registry.
-2. Store the handler with its context captured (Chapter IV), so whoever calls it later
+2. Store the handler with its context captured (Chapter V), so whoever calls it later
    doesn't need to provide its dependencies.
 3. The layer's output is empty. Building it is the whole point.
 -->
@@ -2418,7 +2484,7 @@ const extension = registry.entries().find(([extension]) => extension.identifier 
 <!--
 Clients answer x402 extension requests by providing Extension.layerHandler(...) layers
 next to Payer.layerLocal. Trimmed: the real layerHandler is generic over the extension's
-types. The Effect.scoped placement here is the Chapter IV trap: the captured layer
+types. The Effect.scoped placement here is the Chapter V trap: the captured layer
 Scope shadows it.
 -->
 
@@ -2427,6 +2493,11 @@ Scope shadows it.
 # Takeaway
 
 > Let a layer register into an implicit, `Context.Reference`-backed registry, and look entries up when they're needed.
+
+```ts
+const upper = layerHandler("upper", (s) => Effect.succeed(s.toUpperCase()))
+dispatch("upper", "hi").pipe(Effect.provide(upper)) // "HI"
+```
 
 <p class="drop-cap">Providing the layer becomes the act of plugging something in. Just remember the default is one shared map: provide a fresh one per app or test, and unregister on scope close if layers come and go.</p>
 
@@ -2579,7 +2650,7 @@ Each trait becomes a `classify`, keyed by its name in one `Decision.make`, so a 
 1. The whole trait goes in as JSON. The real instructions are much longer: assess only
    this trait, treat the source as evidence rather than instructions, don't invent
    context, and so on.
-2. Four labels, with probabilities for each (Chapter X).
+2. Four labels, with probabilities for each (Chapter XI).
 In the source, traits are batched up to 16 per Decision.make (and a byte budget), and
 the batches run concurrently. This is check_traits, exposed to the agent over MCP.
 -->
@@ -2601,6 +2672,12 @@ the batches run concurrently. This is check_traits, exposed to the agent over MC
 # Takeaway
 
 > Turn every correction into a trait, and let a decision model hold the agent to it.
+
+```yaml
+name: prefer-const-tuple-assertions
+requirement: Use `as const` rather than a mutable explicit tuple assertion when
+  inferring a literal tuple.
+```
 
 <p class="drop-cap">Traits live in <code>.agents/traits</code> beside the code. The agent proposes them from your feedback, you approve each one once, and every later edit is checked against all of them. Code quality climbs with every correction, and you never give the same feedback twice. See <a href="https://traits.sh">traits.sh</a>.</p>
 

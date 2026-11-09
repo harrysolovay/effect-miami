@@ -281,15 +281,6 @@ const providers = {
 }
 ```
 
-<v-clicks>
-
-- Every provider has to be known to the library
-- A new provider means a new library release
-- Provider-specific configuration must be maintained and carefully migrated between versions
-- Secrets and HTTP clients get handled case by case
-
-</v-clicks>
-
 <!--
 This is the shape most AI-enabled tools ship: a name in config, a lookup table
 in the library. The library ends up owning every integration.
@@ -299,18 +290,20 @@ in the library. The library ends up owning every integration.
 
 # Export a Layer instead
 
-<CodeFile path="traits.ts" label="User config">
+<CodeFile path="x-config.ts" label="User config">
 
-```ts {all|1-3|6-8}
-const layerClient = OpenRouterClient.layerConfig({
-  apiKey: Config.Redacted("OPENROUTER_API_KEY"),
-})
+```ts {all|1|11|4-10}
+import { XConfig } from "x-your-package"
 
 export default {
   layerLanguageModel: OpenRouterLanguageModel.layer({
     model: "anthropic/claude-sonnet-5.5",
-  }).pipe(Layer.provide(layerClient)),
-} satisfies TraitsConfig
+  }).pipe(
+    Layer.provide(OpenRouterClient.layerConfig({
+      apiKey: Config.Redacted("OPENROUTER_API_KEY"),
+    })),
+  ),
+} satisfies XConfig
 ```
 
 </CodeFile>
@@ -322,21 +315,22 @@ The config file is ordinary TypeScript. The user picks the implementation, and w
 </v-click>
 
 <!--
-1. The HTTP client and the API key are the user's business. Config.Redacted keeps
-   the key out of logs.
-2. The value is a Layer that produces Effect's own LanguageModel service. The
-   library never sees the word "OpenRouter".
+1. The library exports the schema for its config.
+2. satisfies checks the whole config against the library's schema.
+3. The value is a Layer that produces Effect's own LanguageModel service. The
+   library never sees the word "OpenRouter". The HTTP client and the API key are the
+   user's business too; Config.Redacted keeps the key out of logs.
 -->
 
 ---
 
 # The library side
 
-<CodeFile path="TraitsConfig.ts" label="Implementation">
+<CodeFile path="XConfig.ts" label="Implementation">
 
-```ts {all|1|3-6|10|11|12}
-export type TraitsConfig = typeof TraitsConfig.Type
-export const TraitsConfig = S.Struct({
+```ts {all|1|3-6|10|11|12|13}
+export type XConfig = typeof XConfig.Type
+export const XConfig = S.Struct({
   layerLanguageModel: S.declare(
     (u): u is Layer.Layer<LanguageModel.LanguageModel, unknown, HttpClient.HttpClient> =>
       Layer.isLayer(u),
@@ -345,7 +339,7 @@ export const TraitsConfig = S.Struct({
 
 export const layer = Effect.gen(function* () {
   const module = yield* Effect.promise(() => import(configUrl))
-  const config = yield* S.decodeUnknownEffect(TraitsConfig)(module.default)
+  const config = yield* S.decodeUnknownEffect(XConfig)(module.default)
   return config.layerLanguageModel.pipe(Layer.orDie)
 }).pipe(Layer.unwrap)
 ```
@@ -357,7 +351,8 @@ export const layer = Effect.gen(function* () {
    is validated like any other input.
 2. Import the user's file at runtime.
 3. Decode it. A bad config fails with a SchemaError, not a crash later on.
-4. Return the user's Layer, and Layer.unwrap turns the whole effect into a Layer.
+4. Return the user's Layer.
+5. Layer.unwrap turns the whole effect into a Layer.
 -->
 
 ---
@@ -373,7 +368,7 @@ const review = Effect.gen(function* () {
   })
   return response.text
 }).pipe(
-  Effect.provide(TraitsConfig.layer),
+  Effect.provide(XConfig.layer),
 )
 ```
 
@@ -385,7 +380,7 @@ A different provider or an internal gateway is just a different Layer in the use
 
 <!--
 1. Library code asks for LanguageModel and nothing else. No provider names anywhere.
-2. TraitsConfig.layer is whatever the user exported. After providing it, the only
+2. XConfig.layer is whatever the user exported. After providing it, the only
    requirement left is HttpClient, which the app supplies.
 -->
 
@@ -397,11 +392,11 @@ A different provider or an internal gateway is just a different Layer in the use
 > Let users configure your library by handing it a Layer.
 
 ```ts
-// traits.ts: the user's choice
-export default { layerLanguageModel } satisfies TraitsConfig
+// x-config.ts: the user's choice
+export default { layerLanguageModel } satisfies XConfig
 
 // the library
-review.pipe(Effect.provide(TraitsConfig.layer))
+review.pipe(Effect.provide(XConfig.layer))
 ```
 
 <p class="drop-cap">The Layer is the extension point. Any implementation of the service works, along with whatever it depends on, and <code>S.declare</code> keeps the boundary validated and typed like any other input.</p>
@@ -532,7 +527,7 @@ nothing               NoSupportedScheme
 
 <v-click>
 
-The same program, four behaviours. Which layers you provide *is* the configuration: no flags, no registry, no list of enabled schemes to keep in sync.
+Which layers you provide *is* the configuration: no flags, no registry, no list of enabled schemes to keep in sync.
 
 </v-click>
 
@@ -709,7 +704,7 @@ const program = Effect.gen(function* () {
   )
 }).pipe(
   Effect.provideServiceEffect(Chat.Chat, Chat.empty),
-  Effect.provide(TraitsConfig.layer),
+  Effect.provide(XConfig.layer),
 )
 ```
 ```ts {5}
@@ -722,7 +717,7 @@ const program = Effect.gen(function* () {
   )
 }).pipe(
   Effect.provideServiceEffect(Chat.Chat, Chat.empty),
-  Effect.provide(TraitsConfig.layer),
+  Effect.provide(XConfig.layer),
 )
 ```
 ```ts {5}
@@ -735,7 +730,7 @@ const program = Effect.gen(function* () {
   )
 }).pipe(
   Effect.provideServiceEffect(Chat.Chat, Chat.empty),
-  Effect.provide(TraitsConfig.layer),
+  Effect.provide(XConfig.layer),
 )
 ```
 ````
@@ -750,7 +745,7 @@ One `.pipe(branch)` per expert. Each sees the opening exchange plus only its own
 Same review function as "Sharing one chat". Checked on Effect 4.1.2 with a stub
 model: each expert's question saw 5 messages (the 2 shared, its role turn, its
 question), and the outer chat stayed at 2.
-Provide an empty Chat to start, and the LanguageModel from Chapter II's TraitsConfig.layer.
+Provide an empty Chat to start, and the LanguageModel from Chapter II's XConfig.layer.
 Last step: branch is just a function from effect to effect, so it composes with flow.
 -->
 
@@ -829,17 +824,19 @@ The hook is registered at one point in the lifecycle and run at another, by code
 
 <CodeFile path="Hooks.ts" label="Implementation">
 
-```ts {all|2|3}
+```ts {all|2|3|4}
 const hooks = yield* Hooks
 const context = yield* Effect.context<R>()
-hooks.set(name, flow(f, Effect.provideContext(context)))
+const fWithContext = flow(f, Effect.provideContext(context))
+hooks.set(name, fWithContext)
 ```
 
 </CodeFile>
 
 <!--
 1. While the layer is being built, grab the context the hook will need.
-2. Store a version of the hook that brings its own context along.
+2. Make a version of the hook that brings its own context along.
+3. Store that version.
 This runs inside layerHook, a layer that registers the hook while it's built. The
 hook's requirements become the layer's requirements, so the type system still makes
 sure Database is provided:
@@ -2452,40 +2449,6 @@ Providing `upper` adds no service. It adds an entry to a `Map` the consumer alre
 Layer order: a consumer built before the handler layer and one built after both found
 the handler. Checked with a Payer-like consumer that captures the registry at build time and looks
 handlers up at call time, merged with the handler layer in both orders.
--->
-
----
-
-# In the wild
-
-<CodeFile path="crosshatch/Extension.ts · crosshatch/Payer.ts" label="crosshatch (trimmed)">
-
-```ts {all|1-5|7-12|14-16}
-export class ExtensionRegistry extends Context.Reference<
-  Map<Extension.Any, (payload: ExtensionHandlerConfig<any>) => Effect.Effect<unknown>>
->("crosshatch/ExtensionRegistry", {
-  defaultValue: () => new Map(),
-}) {}
-
-export const layerHandler = Effect.fnUntraced(function* (extension, f) {
-  const registry = yield* ExtensionRegistry
-  const context = yield* Effect.context<R>()
-  registry.set(extension, flow(f, Effect.provide(Layer.succeedContext(context)), Effect.scoped))
-  return Layer.empty
-}, Layer.unwrap)
-
-// Payer.layerLocal: holds the Map, looks extensions up per payload
-const registry = yield* ExtensionRegistry
-const extension = registry.entries().find(([extension]) => extension.identifier === identifier)
-```
-
-</CodeFile>
-
-<!--
-Clients answer x402 extension requests by providing Extension.layerHandler(...) layers
-next to Payer.layerLocal. Trimmed: the real layerHandler is generic over the extension's
-types. The Effect.scoped placement here is the Chapter V trap: the captured layer
-Scope shadows it.
 -->
 
 ---

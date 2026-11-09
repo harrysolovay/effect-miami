@@ -5,7 +5,10 @@
   "scripts": {
     "dev": "slidev --open",
     "build": "slidev build",
-    "export": "slidev export"
+    "build:deploy": "slidev build && rm -f dist/_redirects",
+    "export": "slidev export",
+    "deploy": "alchemy deploy --stage prod",
+    "destroy": "alchemy destroy --stage prod"
   },
   "dependencies": {
     "@slidev/cli": "^53.1.0",
@@ -13,6 +16,11 @@
     "vue": "^3.5.0"
   },
   "devDependencies": {
-    "@slidev/types": "^53.1.0"
+    "@alchemy.run/cloudflare": "2.0.0-beta.85",
+    "@effect/platform-node": "4.1.2",
+    "@slidev/types": "^53.1.0",
+    "alchemy": "2.0.0-beta.85",
+    "effect": "4.1.2",
+    "typescript": "~5.9.3"
   }
 }
